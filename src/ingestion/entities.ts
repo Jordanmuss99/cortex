@@ -14,9 +14,29 @@ import { llmComplete } from "../lib/llm.js";
 // Add your known entities here for fast matching.
 // Format: "Canonical Name": ["alias1", "alias2", ...]
 const KNOWN_ENTITIES: Record<string, string[]> = {
-  // Example:
-  // "Acme Corp": ["Acme Corp", "Acme", "ACME"],
-  // "John Smith": ["John Smith", "Smith", "John"],
+  // — People / identity —
+  "Jordan (Jordanmuss99)": ["jordanmuss99"],
+  // — Projects —
+  "rts_fps": ["rts_fps", "rts fps"],
+  "Sbox-Claude": ["sbox-claude", "sbox claude", "claudebridge", "sbox-mcp", "claude bridge"],
+  "ADHDPlan": ["adhdplan", "adhd planner", "adhd plan"],
+  "Pterodactyl MC server": ["pterodactyl", "just-create-smp"],
+  // — Stack / tooling —
+  "s&box": ["s&box", "sbox", "facepunch"],
+  "Cortex": ["cortex"],
+  "OpenCode": ["opencode"],
+  "OpenClaw": ["openclaw"],
+  "oh-my-opencode (OMO)": ["oh-my-opencode", "oh-my-openagent", "sisyphus"],
+  "oh-my-claudecode (OMC)": ["oh-my-claudecode"],
+  "Meridian proxy": ["meridian"],
+  "Voyage embeddings": ["voyage-3", "voyageai"],
+  "Linear": ["linear.app", "obsidian-network"],
+  "CodeRabbit": ["coderabbit"],
+  // — rts_fps architecture (ADR-001) —
+  "ADR-001": ["adr-001"],
+  "OrderRouter": ["orderrouter"],
+  "PossessionRouter": ["possessionrouter"],
+  "MatchManager": ["matchmanager"],
 };
 
 const USE_LLM_ENTITIES = process.env.CORTEX_LLM_ENTITIES === "true";

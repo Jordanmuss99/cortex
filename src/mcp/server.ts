@@ -17,6 +17,8 @@ import { chunkText, countTokens } from "../ingestion/chunker.js";
 import { embedTexts } from "../ingestion/embeddings.js";
 import { extractEntities, extractSemanticTags } from "../ingestion/entities.js";
 import { formSynapses } from "../ingestion/synapse-formation.js";
+import { hippocampalEncode } from "../hippocampus/index.js";
+import { analyzeValence } from "../valence/index.js";
 import { ingestFile, ingestCorpus } from "../ingestion/ingest-markdown.js";
 import { runDreamCycle, phaseSynthesis } from "../dream/dream-cycle.js";
 import { runSelfCheck, formatDiagnostic } from "../proprioception/self-check.js";
@@ -118,13 +120,16 @@ server.tool(
           AND status = 'active'
           AND embedding IS NOT NULL
       )
-      SELECT *,
-        (0.50 * cosine_sim
-       + 0.20 * text_match
-       + 0.15 * recency
-       + 0.10 * norm_resonance
-       + 0.05 * priority_boost) AS hybrid_score
-      FROM vector_scores
+      SELECT vs.*,
+        COALESCE(ev.recall_boost, 0) AS emotional_boost,
+        (0.45 * vs.cosine_sim
+       + 0.18 * vs.text_match
+       + 0.12 * vs.recency
+       + 0.10 * vs.norm_resonance
+       + 0.05 * vs.priority_boost
+       + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
+      FROM vector_scores vs
+      LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
       ORDER BY hybrid_score DESC
       LIMIT ${limit}
     `);
@@ -236,9 +241,10 @@ server.tool(
         FROM memory_nodes
         WHERE agent_id = ${agentId} AND status = 'active' AND embedding IS NOT NULL
       )
-      SELECT *,
-        (0.50 * cosine_sim + 0.20 * text_match + 0.15 * recency + 0.10 * norm_resonance + 0.05 * priority_boost) AS hybrid_score
-      FROM vector_scores
+      SELECT vs.*,
+        (0.45 * vs.cosine_sim + 0.18 * vs.text_match + 0.12 * vs.recency + 0.10 * vs.norm_resonance + 0.05 * vs.priority_boost + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
+      FROM vector_scores vs
+      LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
       ORDER BY hybrid_score DESC
       LIMIT 50
     `);
@@ -468,6 +474,15 @@ server.tool(
       const entities = await extractEntities(chunks[i].text);
       const tags = extractSemanticTags(chunks[i].text);
 
+      // Hippocampal encoding: DG pattern separation + CA1 novelty detection
+      // (mirrors the REST /api/v1/ingest pipeline so MCP-stored memories are
+      // first-class: sparse code + novelty-adjusted resonance + valence).
+      const { sparseCode, noveltyResult } = await hippocampalEncode(
+        agentId,
+        embeddings[i],
+        priority
+      );
+
       const [inserted] = await db
         .insert(schema.memoryNodes)
         .values({
@@ -479,11 +494,44 @@ server.tool(
           embedding: embeddings[i],
           entities,
           semanticTags: tags,
-          priority,
-          resonanceScore: 5.0,
+          priority: noveltyResult.adjustedPriority,
+          resonanceScore: noveltyResult.resonanceScore,
           status: "active",
         })
         .returning({ id: schema.memoryNodes.id });
+
+      // Store novelty score on the memory node
+      await db.execute(
+        sql`UPDATE memory_nodes SET novelty_score = ${noveltyResult.noveltyScore} WHERE id = ${inserted.id}`
+      );
+
+      // Store the DG sparse code
+      await db.insert(schema.hippocampalCodes).values({
+        memoryId: inserted.id,
+        agentId,
+        sparseIndices: sparseCode.indices,
+        sparseValues: sparseCode.values,
+        sparseDim: sparseCode.dim,
+        noveltyScore: noveltyResult.noveltyScore,
+      });
+
+      // Emotional valence analysis (feeds recall ranking + dream salience-protection)
+      const { vector: ev, salience } = analyzeValence(chunks[i].text);
+      await db.insert(schema.emotionalValence).values({
+        memoryId: inserted.id,
+        agentId,
+        valence: ev.valence,
+        arousal: ev.arousal,
+        dominance: ev.dominance,
+        certainty: ev.certainty,
+        relevance: ev.relevance,
+        urgency: ev.urgency,
+        intensity: salience.intensity,
+        decayResistance: salience.decayResistance,
+        recallBoost: salience.recallBoost,
+        dominantDimension: salience.dominantDimension,
+      });
+
       insertedIds.push(inserted.id);
     }
 
