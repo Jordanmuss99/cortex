@@ -1196,6 +1196,17 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[cortex-mcp] CORTEX V2 MCP server running");
+
+  // Exit when the stdio client disconnects (stdin EOF / close), so this process
+  // doesn't orphan and leak DB connections. On Windows, killing the launching
+  // cmd.exe does NOT reliably kill this child — self-terminate on disconnect.
+  const shutdown = (why: string) => {
+    console.error(`[cortex-mcp] client disconnected (${why}); exiting`);
+    process.exit(0);
+  };
+  process.stdin.on("end", () => shutdown("stdin end"));
+  process.stdin.on("close", () => shutdown("stdin close"));
+  process.stdin.on("error", () => shutdown("stdin error"));
 }
 
 main().catch((err) => {
