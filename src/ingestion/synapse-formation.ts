@@ -181,7 +181,7 @@ export async function formSynapses(
   }
 
   if (synapsesCreated > 0) {
-    console.log(
+    console.error(
       `[synapses] Formed ${synapsesCreated} synapses for ${newNodeIds.length} new nodes`
     );
   }

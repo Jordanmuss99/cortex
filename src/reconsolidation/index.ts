@@ -213,7 +213,7 @@ export async function reconsolidate(
   // Step 7: Clear labile state (memory has restabilized with new content)
   // Already done above by setting last_recalled_at = NULL
 
-  console.log(
+  console.error(
     `[reconsolidation] Memory #${memoryId} reconsolidated. Reason: ${reason}. Resonance: ${memory.resonance_score?.toFixed(1)} → ${newResonance.toFixed(1)}`
   );
 

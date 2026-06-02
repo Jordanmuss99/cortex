@@ -64,7 +64,7 @@ export async function storeProcedural(
     })
     .returning({ id: schema.proceduralMemories.id });
 
-  console.log(
+  console.error(
     `[procedural] Stored: "${input.name}" (${input.proceduralType}) → #${inserted.id}`
   );
 
@@ -220,7 +220,7 @@ export async function recordExecution(
       SET proficiency = ${newProficiency}
       WHERE id = ${proceduralId}
     `);
-    console.log(
+    console.error(
       `[procedural] #${proceduralId} proficiency: ${current.proficiency} → ${newProficiency}`
     );
   }
@@ -282,6 +282,6 @@ export async function refineProcedural(
     WHERE id = ${proceduralId}
   `);
 
-  console.log(`[procedural] #${proceduralId} refined → v${newVersion}`);
+  console.error(`[procedural] #${proceduralId} refined → v${newVersion}`);
   return newVersion;
 }

@@ -71,7 +71,7 @@ export async function ingestTelegramFile(
 
   // Chunk the full content (telegram messages flow naturally)
   const chunks = chunkText(content);
-  console.log(
+  console.error(
     `[telegram] ${basename(filePath)}: ${chunks.length} chunks`
   );
 

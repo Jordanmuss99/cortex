@@ -9,6 +9,9 @@ const isNeon = DATABASE_URL.includes("neon.tech");
 
 const client = postgres(DATABASE_URL, {
   ...(isNeon ? { ssl: "require" } : {}),
+  onnotice: (notice) => {
+    console.error("[db notice]", notice.message ?? notice);
+  },
 });
 
 const rawDb = drizzle(client, { schema });
@@ -125,7 +128,7 @@ export async function initDatabase() {
   // Index for resonance-based queries (dream pruning, consolidation)
   await client`CREATE INDEX IF NOT EXISTS idx_mn_agent_resonance ON memory_nodes(agent_id, resonance_score) WHERE status = 'active'`;
 
-  console.log("[db] pgvector extension enabled, schema migrations applied (v7: production indexes)");
+  console.error("[db] pgvector extension enabled, schema migrations applied (v7: production indexes)");
 }
 
 export { schema };

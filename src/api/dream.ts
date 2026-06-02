@@ -31,7 +31,7 @@ router.post("/", async (req: Request, res: Response) => {
 
     const agent = agentResult.rows[0] as { id: number; external_id: string; name: string };
 
-    console.log(`[dream-api] Starting ${cycleType} dream cycle for ${agent.external_id}`);
+    console.error(`[dream-api] Starting ${cycleType} dream cycle for ${agent.external_id}`);
     const stats = await runDreamCycle(agent.id, cycleType);
 
     res.json({

@@ -155,7 +155,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
       const batch = texts.slice(i, i + BATCH_SIZE);
       const embeddings = await voyageEmbedBatch(batch);
       allEmbeddings.push(...embeddings);
-      console.log(
+      console.error(
         `[embeddings] Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(texts.length / BATCH_SIZE)} — ${batch.length} texts (voyage)`
       );
       if (i + BATCH_SIZE < texts.length) await sleep(100);
@@ -169,7 +169,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
     const batch = texts.slice(i, i + BATCH_SIZE);
     const embeddings = await Promise.all(batch.map((t) => ollamaEmbed(t)));
     allEmbeddings.push(...embeddings);
-    console.log(
+    console.error(
       `[embeddings] Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(texts.length / BATCH_SIZE)} — ${batch.length} texts (ollama)`
     );
     if (i + BATCH_SIZE < texts.length) await sleep(200);

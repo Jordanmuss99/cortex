@@ -48,9 +48,9 @@ async function startWatcher() {
     `${workspace}/logs`,
   ];
 
-  console.log(`[watcher] Watching for changes (agent: ${agent.name})`);
-  console.log(`[watcher] Paths: ${watchPaths.join(", ")}`);
-  console.log(`[watcher] Debounce: ${DEBOUNCE_MS / 1000}s`);
+  console.error(`[watcher] Watching for changes (agent: ${agent.name})`);
+  console.error(`[watcher] Paths: ${watchPaths.join(", ")}`);
+  console.error(`[watcher] Debounce: ${DEBOUNCE_MS / 1000}s`);
 
   const watcher = watch(watchPaths, {
     persistent: true,
@@ -73,7 +73,7 @@ async function startWatcher() {
       filePath,
       setTimeout(async () => {
         pendingIngests.delete(filePath);
-        console.log(`[watcher] Ingesting: ${filePath}`);
+        console.error(`[watcher] Ingesting: ${filePath}`);
 
         try {
           let sourceType = "markdown";
@@ -91,14 +91,14 @@ async function startWatcher() {
               sourceType,
             });
           }
-          console.log(`[watcher] Done: ${filePath}`);
+          console.error(`[watcher] Done: ${filePath}`);
         } catch (err) {
           console.error(`[watcher] Error ingesting ${filePath}:`, err);
         }
       }, DEBOUNCE_MS)
     );
 
-    console.log(
+    console.error(
       `[watcher] Queued: ${filePath} (will ingest in ${DEBOUNCE_MS / 1000}s)`
     );
   }
@@ -110,7 +110,7 @@ async function startWatcher() {
 
   // Handle graceful shutdown
   process.on("SIGINT", () => {
-    console.log("\n[watcher] Shutting down...");
+    console.error("\n[watcher] Shutting down...");
     watcher.close();
     process.exit(0);
   });

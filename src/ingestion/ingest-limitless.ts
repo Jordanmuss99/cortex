@@ -42,7 +42,7 @@ export async function ingestLimitlessFile(
 
   // Chunk the transcript
   const chunks = chunkText(content);
-  console.log(
+  console.error(
     `[limitless] ${basename(filePath)}: ${chunks.length} chunks`
   );
 

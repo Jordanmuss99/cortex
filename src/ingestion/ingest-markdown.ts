@@ -83,14 +83,14 @@ export async function ingestFile(options: IngestOptions): Promise<number> {
           eq(schema.memoryNodes.source, sourcePath)
         )
       );
-    console.log(
+    console.error(
       `[ingest] Cleared ${existing.length} old chunks for ${basename(sourcePath)}`
     );
   }
 
   // Chunk
   const chunks = chunkText(content);
-  console.log(
+  console.error(
     `[ingest] ${basename(sourcePath)}: ${chunks.length} chunks (${content.length} chars)`
   );
 
@@ -233,7 +233,7 @@ export async function ingestCorpus(agentId: number): Promise<void> {
       });
       totalChunks += count;
     } catch {
-      console.log(`[ingest] Skipping ${file} (not found)`);
+      console.error(`[ingest] Skipping ${file} (not found)`);
     }
   }
 
@@ -242,7 +242,7 @@ export async function ingestCorpus(agentId: number): Promise<void> {
     try {
       statSync(dir.path);
     } catch {
-      console.log(`[ingest] Skipping directory ${dir.path} (not found)`);
+      console.error(`[ingest] Skipping directory ${dir.path} (not found)`);
       continue;
     }
 
@@ -252,7 +252,7 @@ export async function ingestCorpus(agentId: number): Promise<void> {
       (f) => !coreFiles.some((cf) => f.endsWith(`/${cf}`))
     );
 
-    console.log(`[ingest] ${dir.path}: ${filtered.length} files`);
+    console.error(`[ingest] ${dir.path}: ${filtered.length} files`);
 
     for (const file of filtered) {
       try {
@@ -268,7 +268,7 @@ export async function ingestCorpus(agentId: number): Promise<void> {
     }
   }
 
-  console.log(`[ingest] Corpus ingestion complete: ${totalChunks} total chunks`);
+  console.error(`[ingest] Corpus ingestion complete: ${totalChunks} total chunks`);
 }
 
 // CLI entry point
@@ -294,7 +294,7 @@ if (process.argv[1]?.endsWith("ingest-markdown.ts") || process.argv[1]?.endsWith
           ownerId: "rez",
         })
         .returning();
-      console.log(`[ingest] Created agent: ${agent.name} (id: ${agent.id})`);
+      console.error(`[ingest] Created agent: ${agent.name} (id: ${agent.id})`);
     }
 
     await ingestCorpus(agent.id);

@@ -42,7 +42,7 @@ export async function runDreamCycle(
 ): Promise<DreamStats> {
   const startTime = Date.now();
 
-  console.log(`[dream] Starting ${cycleType} dream cycle for agent ${agentId}`);
+  console.error(`[dream] Starting ${cycleType} dream cycle for agent ${agentId}`);
 
   // Create log entry
   const [logEntry] = await db
@@ -77,17 +77,17 @@ export async function runDreamCycle(
   try {
     // ═══ SWS (Slow-Wave Sleep): Memory maintenance & consolidation ═══
     if (runSws || cycleType === "resonance_only" || cycleType === "pruning_only" || cycleType === "consolidation_only") {
-      if (runSws) console.log("[dream] ═══ SWS Phase (Slow-Wave Sleep) ═══");
+      if (runSws) console.error("[dream] ═══ SWS Phase (Slow-Wave Sleep) ═══");
 
       // ─── Phase 1: Resonance Analysis ──────────────────────
       if (runSws || cycleType === "resonance_only") {
-        console.log("[dream] Phase 1 [SWS]: Resonance Analysis");
+        console.error("[dream] Phase 1 [SWS]: Resonance Analysis");
         stats.phase1_resonanceUpdated = await phaseResonanceAnalysis(agentId);
       }
 
       // ─── Phase 2: Pruning ─────────────────────────────────
       if (runSws || cycleType === "pruning_only") {
-        console.log("[dream] Phase 2 [SWS]: Pruning");
+        console.error("[dream] Phase 2 [SWS]: Pruning");
         const pruneResult = await phasePruning(agentId);
         stats.phase2_memoriesDeleted = pruneResult.deleted;
         stats.phase2_memoriesArchived = pruneResult.archived;
@@ -97,7 +97,7 @@ export async function runDreamCycle(
 
       // ─── Phase 3: Consolidation ───────────────────────────
       if (runSws || cycleType === "consolidation_only") {
-        console.log("[dream] Phase 3 [SWS]: Consolidation");
+        console.error("[dream] Phase 3 [SWS]: Consolidation");
         const consolidateResult = await phaseConsolidation(agentId);
         stats.phase3_clustersFound = consolidateResult.clustersFound;
         stats.phase3_consolidations = consolidateResult.consolidations;
@@ -108,17 +108,17 @@ export async function runDreamCycle(
 
     // ═══ REM (Rapid Eye Movement): Creative association & synthesis ═══
     if (runRem) {
-      console.log("[dream] ═══ REM Phase (Rapid Eye Movement) ═══");
+      console.error("[dream] ═══ REM Phase (Rapid Eye Movement) ═══");
 
       // ─── Phase 4: Free Association ────────────────────────
-      console.log("[dream] Phase 4 [REM]: Free Association");
+      console.error("[dream] Phase 4 [REM]: Free Association");
       const freeAssocResult = await phaseFreeAssociation(agentId);
       stats.phase4_nodesActivated = freeAssocResult.nodesActivated;
       stats.phase4_novelSynapses = freeAssocResult.novelSynapses;
       insights.push(...freeAssocResult.insights);
 
       // ─── Phase 5: Synthesis ────────────────────────────
-      console.log("[dream] Phase 5 [REM]: Synthesis");
+      console.error("[dream] Phase 5 [REM]: Synthesis");
       const synthesisResult = await phaseSynthesis(agentId, 24);
       stats.phase5_synthesesCreated = synthesisResult.synthesesCreated;
       insights.push(...synthesisResult.insights);
@@ -136,7 +136,7 @@ export async function runDreamCycle(
       })
       .where(eq(schema.dreamCycleLogs.id, logEntry.id));
 
-    console.log(
+    console.error(
       `[dream] Dream cycle complete in ${(stats.totalDurationMs / 1000).toFixed(1)}s`,
       stats
     );
@@ -211,7 +211,7 @@ async function phaseResonanceAnalysis(agentId: number): Promise<number> {
   `);
 
   const count = Number((result as { rowCount?: number }).rowCount || 0);
-  console.log(`[dream] Phase 1: Updated resonance for ${count} memories (Ebbinghaus stability-adjusted decay)`);
+  console.error(`[dream] Phase 1: Updated resonance for ${count} memories (Ebbinghaus stability-adjusted decay)`);
   return count;
 }
 
@@ -255,7 +255,7 @@ async function phasePruning(agentId: number): Promise<{
   const deleteThreshold = Math.min(Number(pRow?.p5 ?? 1.0), 2.0);
   const archiveThreshold = Math.min(Number(pRow?.p15 ?? 3.0), 4.0);
 
-  console.log(
+  console.error(
     `[dream] Phase 2: Adaptive thresholds — delete < ${deleteThreshold.toFixed(2)} (P5), archive < ${archiveThreshold.toFixed(2)} (P15), corpus: ${pRow?.total ?? 0} eligible memories`
   );
 
@@ -324,7 +324,7 @@ async function phasePruning(agentId: number): Promise<{
   `);
   const observationsPruned = Number((observationResult as { rowCount?: number }).rowCount || 0);
 
-  console.log(
+  console.error(
     `[dream] Phase 2: Deleted ${deleted}, archived ${archived}, pruned ${synapsesPruned} synapses, ${observationsPruned} observations`
   );
 
@@ -367,7 +367,7 @@ async function phaseConsolidation(agentId: number): Promise<{
   }>;
 
   if (nodes.length < 2) {
-    console.log("[dream] Phase 3: Not enough high-resonance nodes for consolidation");
+    console.error("[dream] Phase 3: Not enough high-resonance nodes for consolidation");
     return { clustersFound: 0, consolidations: 0, synapsesStrengthened: 0, insights };
   }
 
@@ -486,11 +486,11 @@ async function phaseConsolidation(agentId: number): Promise<{
         { maxTokens: 150, temperature: 0.3 }
       );
       summary = llmResult.content.trim();
-      console.log(`[dream] Phase 3: LLM summary for cluster of ${clusterNodes.length}: "${summary.slice(0, 100)}..."`);
+      console.error(`[dream] Phase 3: LLM summary for cluster of ${clusterNodes.length}: "${summary.slice(0, 100)}..."`);
     } catch {
       // Fallback to extractive summary if LLM unavailable
       summary = `[Consolidated cluster of ${clusterNodes.length} memories] Entities: ${allEntities.slice(0, 20).join(", ")}. Tags: ${allTags.slice(0, 10).join(", ")}. Avg resonance: ${avgResonance.toFixed(1)}.`;
-      console.log(`[dream] Phase 3: LLM unavailable, using extractive summary`);
+      console.error(`[dream] Phase 3: LLM unavailable, using extractive summary`);
     }
 
     // Store consolidation as cognitive artifact
@@ -530,7 +530,7 @@ async function phaseConsolidation(agentId: number): Promise<{
     });
   }
 
-  console.log(
+  console.error(
     `[dream] Phase 3: ${significantClusters.length} clusters, ${consolidations} consolidations, ${synapsesStrengthened} synapses strengthened`
   );
 
@@ -707,7 +707,7 @@ async function phaseFreeAssociation(agentId: number): Promise<{
     console.warn("[dream] Phase 4: Sparse association error (non-fatal):", err);
   }
 
-  console.log(
+  console.error(
     `[dream] Phase 4: Activated ${nodes.length} nodes, created ${novelSynapses} novel synapses (dense + sparse)`
   );
 
@@ -795,7 +795,7 @@ export async function phaseSynthesis(
     }
   }
 
-  console.log(`[dream] Phase 5: Created ${synthesesCreated} synthesis insights`);
+  console.error(`[dream] Phase 5: Created ${synthesesCreated} synthesis insights`);
   return { synthesesCreated, insights };
 }
 
@@ -822,7 +822,7 @@ if (
     }
 
     const stats = await runDreamCycle(agent.id, cycleType);
-    console.log("[dream] Final stats:", JSON.stringify(stats, null, 2));
+    console.error("[dream] Final stats:", JSON.stringify(stats, null, 2));
     process.exit(0);
   })();
 }
