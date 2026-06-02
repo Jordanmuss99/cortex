@@ -250,25 +250,20 @@ export async function runRelationalThread(agentId: number): Promise<ThreadResult
     }
   }
 
-  // Fallback: if no relationship graph data, check entity frequency trends
-  if (overdueRows.length === 0 && openRows.length === 0) {
-    const entityTrend = await db.execute(sql`
-      SELECT unnest(entities) as entity, COUNT(*) as mentions
-      FROM memory_nodes
-      WHERE agent_id = ${agentId} AND status = 'active'
-        AND created_at > NOW() - INTERVAL '30 days'
-      GROUP BY entity
-      HAVING COUNT(*) >= 3
-      ORDER BY mentions DESC
-      LIMIT 15
-    `);
+  // Distinguish "graph is empty" from "graph is seeded but nothing pending".
+  // Previously this fell back to listing the most-mentioned ENTITIES as
+  // "Top active contacts" (e.g. "Program Files", "In Progress") — which are not
+  // people — and wrongly claimed the graph was unseeded whenever nothing was
+  // overdue. Relational cognition should only reason over real relationships.
+  const relCountRes = await db.execute(sql`
+    SELECT COUNT(*)::int AS n FROM relationship_graph WHERE agent_id = ${agentId}
+  `);
+  const relCount = (relCountRes.rows[0] as { n: number }).n;
 
-    const entities = entityTrend.rows as Array<{ entity: string; mentions: string }>;
-    if (entities.length > 0) {
-      insights.push(`Top active contacts (by mention): ${entities.slice(0, 5).map(e => `${e.entity} (${e.mentions})`).join(", ")}`);
-    }
-
-    questions.push("Relationship graph may not be seeded. Run seed-relationships to populate.");
+  if (relCount === 0) {
+    questions.push("Relationship graph is empty. Seed contacts with cortex_relationship_update so relational cognition has data to work with.");
+  } else if (overdueRows.length === 0 && openRows.length === 0) {
+    insights.push(`Relationship graph has ${relCount} contact(s); none overdue and no open items.`);
   }
 
   const result = { insights, actions, questions };

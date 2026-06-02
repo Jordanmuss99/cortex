@@ -1012,7 +1012,9 @@ server.tool(
   },
   async ({ agent_id, period }) => {
     const agentId = await resolveAgent(agent_id);
-    const result = await runWeeklyAudit(agentId, period);
+    // Manual/on-demand audit always runs (force=true); the scheduled weekly
+    // runner dedups against recent audits.
+    const result = await runWeeklyAudit(agentId, period, true);
     return { content: [{ type: "text" as const, text: formatAuditResult(result) }] };
   }
 );

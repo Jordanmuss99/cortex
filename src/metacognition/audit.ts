@@ -23,10 +23,27 @@ interface AuditResult {
   recommendations: string[];
 }
 
-export async function runWeeklyAudit(agentId: number, period?: string): Promise<AuditResult> {
+export async function runWeeklyAudit(agentId: number, period?: string, force = false): Promise<AuditResult> {
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const periodLabel = period || `${weekAgo.toISOString().split("T")[0]} to ${now.toISOString().split("T")[0]}`;
+
+  // Dedup: a weekly audit re-run within 6 days should not create a duplicate
+  // artifact (manual on-demand runs pass force=true to override this).
+  let skipStore = false;
+  if (!force) {
+    const sixDaysAgo = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+    const recentAudit = await db
+      .select({ id: schema.cognitiveArtifacts.id })
+      .from(schema.cognitiveArtifacts)
+      .where(and(
+        eq(schema.cognitiveArtifacts.agentId, agentId),
+        eq(schema.cognitiveArtifacts.artifactType, "audit"),
+        gte(schema.cognitiveArtifacts.createdAt, sixDaysAgo)
+      ))
+      .limit(1);
+    skipStore = recentAudit.length > 0;
+  }
 
   // Get reasoning traces from the past week
   const traces = await db
@@ -60,11 +77,14 @@ export async function runWeeklyAudit(agentId: number, period?: string): Promise<
     "low (<0.5)": confidences.filter(c => c < 0.5).length,
   };
 
-  // Pattern detection
-  if (avgConfidence > 0.85) {
+  // Pattern detection — only when we actually have traces. With zero traces
+  // avgConfidence is 0, which must NOT be read as a "low confidence" signal
+  // (that is "no data", not a finding).
+  const hasData = confidences.length > 0;
+  if (hasData && avgConfidence > 0.85) {
     biasIndicators.push("Overconfidence bias: average confidence is unusually high. Consider whether uncertainty is being properly acknowledged.");
   }
-  if (avgConfidence < 0.35) {
+  if (hasData && avgConfidence < 0.35) {
     patterns.push("Low confidence trend: may indicate operating in unfamiliar territory or insufficient context.");
   }
   if (confidences.filter(c => c > 0.8).length === confidences.length && confidences.length > 3) {
@@ -91,31 +111,36 @@ export async function runWeeklyAudit(agentId: number, period?: string): Promise<
     }
   }
 
-  // Alignment check: read SOUL.md and PRIME-CONTEXT.md for reference
-  const workspaceDir = process.env.CORTEX_WORKSPACE || process.cwd();
-  try {
-    const soul = await readFile(join(workspaceDir, "SOUL.md"), "utf-8");
-    const prime = await readFile(join(workspaceDir, "PRIME-CONTEXT.md"), "utf-8");
+  // Alignment check: only when an alignment workspace is explicitly configured
+  // via CORTEX_WORKSPACE. Previously this fell back to process.cwd(), so a
+  // headless/in-container run with no identity files emitted a noisy
+  // "Could not read SOUL.md or PRIME-CONTEXT.md" note on every single audit.
+  const workspaceDir = process.env.CORTEX_WORKSPACE;
+  if (workspaceDir) {
+    try {
+      await readFile(join(workspaceDir, "SOUL.md"), "utf-8");
+      await readFile(join(workspaceDir, "PRIME-CONTEXT.md"), "utf-8");
 
-    // Check if any reasoning traces mention or align with core values
-    const coreValues = ["protect", "truth", "genuine", "loyalty", "harm"];
-    for (const trace of traces) {
-      const content = JSON.stringify(trace.content).toLowerCase();
-      const mentionedValues = coreValues.filter(v => content.includes(v));
-      if (mentionedValues.length > 0) {
-        alignmentNotes.push(`Trace #${trace.id} references core values: ${mentionedValues.join(", ")}`);
+      // Check if any reasoning traces mention or align with core values
+      const coreValues = ["protect", "truth", "genuine", "loyalty", "harm"];
+      for (const trace of traces) {
+        const content = JSON.stringify(trace.content).toLowerCase();
+        const mentionedValues = coreValues.filter(v => content.includes(v));
+        if (mentionedValues.length > 0) {
+          alignmentNotes.push(`Trace #${trace.id} references core values: ${mentionedValues.join(", ")}`);
+        }
       }
-    }
 
-    // Check for em-dash usage in traces (STANDING-ORDERS violation)
-    for (const trace of traces) {
-      const content = JSON.stringify(trace.content);
-      if (content.includes("\u2014")) {
-        biasIndicators.push(`Trace #${trace.id} contains em-dash (writing style violation)`);
+      // Check for em-dash usage in traces (STANDING-ORDERS violation)
+      for (const trace of traces) {
+        const content = JSON.stringify(trace.content);
+        if (content.includes("\u2014")) {
+          biasIndicators.push(`Trace #${trace.id} contains em-dash (writing style violation)`);
+        }
       }
+    } catch {
+      alignmentNotes.push(`CORTEX_WORKSPACE is set but SOUL.md / PRIME-CONTEXT.md could not be read in ${workspaceDir}`);
     }
-  } catch {
-    alignmentNotes.push("Could not read SOUL.md or PRIME-CONTEXT.md for alignment check");
   }
 
   // Recommendations
@@ -140,6 +165,11 @@ export async function runWeeklyAudit(agentId: number, period?: string): Promise<
     recommendations,
   };
 
+  if (skipStore) {
+    console.error(`[audit] Skipped storing — a weekly audit already exists in the last 6 days (pass force=true to override).`);
+    return result;
+  }
+
   // Store audit as cognitive artifact
   await db.insert(schema.cognitiveArtifacts).values({
     agentId,
@@ -149,9 +179,11 @@ export async function runWeeklyAudit(agentId: number, period?: string): Promise<
   });
 
   // ── Feedback Loop: Store actionable findings as high-priority memories ──
-  // When the audit detects bias or inconsistency, inject corrective memories
-  // so they surface in future cortex_init and influence future decisions.
-  if (biasIndicators.length > 0 || patterns.length > 0) {
+  // When the audit detects REAL bias or inconsistency (requires traces to
+  // analyze), inject a corrective artifact so it surfaces in future
+  // cortex_init. Stored as its own "audit_feedback" type so it never pollutes
+  // genuine "correction" artifacts (past-mistake + fix records).
+  if (traces.length > 0 && (biasIndicators.length > 0 || patterns.length > 0)) {
     const feedbackContent = [
       biasIndicators.length > 0 ? `BIAS DETECTED: ${biasIndicators.join("; ")}` : "",
       patterns.length > 0 ? `PATTERNS: ${patterns.join("; ")}` : "",
@@ -160,7 +192,7 @@ export async function runWeeklyAudit(agentId: number, period?: string): Promise<
 
     await db.insert(schema.cognitiveArtifacts).values({
       agentId,
-      artifactType: "correction",
+      artifactType: "audit_feedback",
       content: {
         type: "audit_feedback",
         period: periodLabel,
@@ -170,12 +202,12 @@ export async function runWeeklyAudit(agentId: number, period?: string): Promise<
         actionRequired: recommendations.length > 0,
         timestamp: new Date().toISOString(),
       },
-      // P1 priority equivalent resonance — ensures this surfaces in future cortex_init
+      // High resonance — ensures this surfaces in future cortex_init
       resonanceScore: 8.0,
     });
 
-    console.log(
-      `[audit] Feedback loop: stored ${biasIndicators.length} bias indicators and ${patterns.length} patterns as P1 corrective artifact`
+    console.error(
+      `[audit] Feedback loop: stored ${biasIndicators.length} bias indicators and ${patterns.length} patterns as audit_feedback artifact`
     );
   }
 
