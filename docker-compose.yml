@@ -3,25 +3,32 @@ version: "3.8"
 services:
   db:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: cortex
       POSTGRES_PASSWORD: cortex
       POSTGRES_DB: cortex
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - cortex_data:/var/lib/postgresql/data
+      - ./init-cortex-db.sql:/docker-entrypoint-initdb.d/init.sql
 
   cortex:
     build: .
+    restart: unless-stopped
     depends_on:
       - db
     environment:
       DATABASE_URL: "postgresql://cortex:cortex@db:5432/cortex"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-voyage}"
       VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   cortex_data:
