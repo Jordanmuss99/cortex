@@ -9,6 +9,7 @@ import { healthRouter } from "./api/health.js";
 import { reconsolidateRouter } from "./api/reconsolidate.js";
 import { proceduralRouter } from "./api/procedural.js";
 import { graphRouter } from "./api/graph.js";
+import { cognitionRouter } from "./api/cognition.js";
 import { dreamRouter } from "./api/dream.js";
 
 const app = express();
@@ -25,6 +26,7 @@ app.use("/api/v1/ingest", ingestRouter);
 app.use("/api/v1/reconsolidate", reconsolidateRouter);
 app.use("/api/v1/procedural", proceduralRouter);
 app.use("/api/v1/graph", graphRouter);
+app.use("/api/v1/cognition", cognitionRouter);
 app.use("/api/v1/dream", dreamRouter);
 app.use("/api/v1", healthRouter);
 
@@ -47,6 +49,7 @@ app.get("/", (_req, res) => {
       proceduralExecute: "POST /api/v1/procedural/:id/execute",
       proceduralRefine: "PATCH /api/v1/procedural/:id",
       graph: "GET /api/v1/graph?agentId=xxx",
+      cognition: "GET /api/v1/cognition?agentId=xxx",
       dream: "POST /api/v1/dream",
     },
   });
@@ -56,14 +59,14 @@ app.get("/", (_req, res) => {
 async function start() {
   try {
     await initDatabase();
-    console.log("[cortex] Database connected");
+    console.error("[cortex] Database connected");
   } catch (err) {
     console.error("[cortex] Database connection failed:", err);
-    console.log("[cortex] Starting without database — some endpoints will fail");
+    console.error("[cortex] Starting without database — some endpoints will fail");
   }
 
   app.listen(PORT, () => {
-    console.log(`[cortex] CORTEX V2 running on http://localhost:${PORT}`);
+    console.error(`[cortex] CORTEX V2 running on http://localhost:${PORT}`);
   });
 }
 
