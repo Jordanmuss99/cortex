@@ -30,5 +30,21 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  cortex-mcp:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: "postgresql://cortex:cortex@db:5432/cortex"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-voyage}"
+      VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: ["npx", "-y", "supergateway", "--stdio", "npx tsx src/mcp/server.ts", "--port", "8000"]
+
+
 volumes:
   cortex_data:
