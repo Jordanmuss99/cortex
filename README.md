@@ -223,14 +223,15 @@ npx tsx src/index.ts
 CORTEX uses a 7-factor hybrid scoring system:
 
 ```
-score = 0.50 * cosine_similarity    (semantic relevance)
-      + 0.20 * text_match           (exact keyword hit)
-      + 0.15 * recency              (exponential decay, 30-day half-life)
+score = 0.45 * cosine_similarity    (semantic relevance)
+      + 0.18 * text_match           (exact keyword hit)
+      + 0.12 * recency              (exponential decay, 30-day half-life)
       + 0.10 * resonance            (Ebbinghaus stability-adjusted)
       + 0.05 * priority_boost       (P0=1.0 critical ... P4=0.1 ephemeral)
+      + 0.10 * emotional_boost      (valence recall boost)
 ```
 
-Plus CA3 pattern completion boost and emotional recall boost in `--verbose` mode. This isn't just "find the nearest vector." It's a judgment call about what's relevant right now, weighted by how important it is, how recent, and how connected to other things the agent knows.
+Plus optional CA3 pattern completion blending (0.3x activation). This isn't just "find the nearest vector." It's a judgment call about what's relevant right now, weighted by how important it is, how recent, how emotionally salient, and how connected to other things the agent knows.
 
 ---
 
@@ -281,7 +282,7 @@ See [REFERENCES.md](REFERENCES.md) for DOIs, URLs, abstracts, and the mapping fr
 npm test
 ```
 
-34 tests covering Dentate Gyrus encoding (sparsity, determinism, normalization, pattern separation), entity extraction, and text chunking.
+58 tests covering Dentate Gyrus encoding (sparsity, determinism, normalization, pattern separation), entity extraction and junk-phrase filtering, text chunking, and SQL array casting.
 
 ---
 
