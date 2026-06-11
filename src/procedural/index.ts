@@ -270,12 +270,21 @@ export async function refineProcedural(
   const textForEmbedding = `${current.name}. ${newTrigger}. ${newDesc}. ${newSteps.join(". ")}`;
   const [embedding] = await embedTexts([textForEmbedding]);
 
+  // Drizzle serializes JS arrays in raw sql`` as composite ROW(...) which
+  // Postgres refuses to cast to text[] ("syntax error at or near )"). Build
+  // explicit array literals instead (same pattern as reconsolidation's
+  // entities/tags). Found 2026-06-12 on the first-ever real skill_refine call.
+  const toTextArrayLiteral = (arr: string[]) =>
+    `{${arr.map((s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}`;
+  const stepsLiteral = toTextArrayLiteral(newSteps);
+  const tagsLiteral = toTextArrayLiteral(newTags);
+
   await db.execute(sql`
     UPDATE procedural_memories
     SET description = ${newDesc},
-        steps = ${newSteps}::text[],
+        steps = ${stepsLiteral}::text[],
         trigger_context = ${newTrigger},
-        domain_tags = ${newTags}::text[],
+        domain_tags = ${tagsLiteral}::text[],
         embedding = ${`[${embedding.join(",")}]`}::vector,
         version = ${newVersion},
         updated_at = NOW()
