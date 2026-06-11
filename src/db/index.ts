@@ -33,9 +33,15 @@ const patchedDb = rawDb as unknown as CortexDb;
 (patchedDb as any).execute = async (query: SQL): Promise<NeonCompatResult> => {
   const result = await origExecute(query);
   const arr = Array.isArray(result) ? [...result] : [];
+  // postgres-js reports affected rows for INSERT/UPDATE/DELETE on result.count;
+  // the array itself is empty unless RETURNING is used. Deriving rowCount from
+  // arr.length made every write query report 0 (dream-cycle stats showed
+  // phase1_resonanceUpdated=0 etc. every night while the updates ran fine).
+  // For SELECT, count === arr.length, so preferring count is always correct.
+  const affected = (result as unknown as { count?: number }).count;
   return Object.assign(result, {
     rows: arr,
-    rowCount: arr.length,
+    rowCount: typeof affected === "number" ? affected : arr.length,
   }) as unknown as NeonCompatResult;
 };
 
