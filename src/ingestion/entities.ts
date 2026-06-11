@@ -142,11 +142,16 @@ function extractEntitiesFast(text: string): string[] {
     /(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*)(?:[ \t]+[A-Z][a-z]+(?:[A-Z][a-z]+)*)+/g
   );
   if (properNouns) {
+    // Canonicals matched above, lowercased -- used to drop compound captures
+    // that are just adjacent canonical mentions ("SimsOnline DedicatedServer"
+    // when both canonicals were already extracted individually).
+    const canonicalLower = new Set([...found].map((f) => f.toLowerCase()));
     for (const noun of properNouns) {
       const refined = refineProperNounPhrase(noun);
-      if (refined && !found.has(refined)) {
-        found.add(refined);
-      }
+      if (!refined || found.has(refined)) continue;
+      const words = refined.split(" ");
+      if (words.every((w) => canonicalLower.has(w.toLowerCase()))) continue;
+      found.add(refined);
     }
   }
 

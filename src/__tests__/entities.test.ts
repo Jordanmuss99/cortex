@@ -65,6 +65,13 @@ describe("Entity Extraction", () => {
       expect(entities).toContain("DedicatedServer");
       expect(entities).toContain("Sunset Valley");
     });
+
+    it("should not mint compound captures of adjacent canonicals", () => {
+      const entities = extractEntitiesSync("SimsOnline DedicatedServer probe confirmed.");
+      expect(entities).toContain("SimsOnline");
+      expect(entities).toContain("DedicatedServer");
+      expect(entities).not.toContain("SimsOnline DedicatedServer");
+    });
   });
 
   describe("refineProperNounPhrase", () => {
