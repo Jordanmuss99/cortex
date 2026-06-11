@@ -21,8 +21,8 @@
     "cogbench:generate": "tsx benchmarks/cogbench/generate.ts",
     "cogbench:run": "tsx benchmarks/cogbench/run.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests",
-    "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --watch"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch"
   },
   "keywords": [
     "ai",
