@@ -1,4 +1,9 @@
-import { extractEntitiesSync, extractSemanticTags } from "../ingestion/entities.js";
+import {
+  extractEntitiesSync,
+  extractSemanticTags,
+  refineProperNounPhrase,
+  isJunkStoredEntity,
+} from "../ingestion/entities.js";
 
 describe("Entity Extraction", () => {
   describe("extractEntitiesSync (fast mode)", () => {
@@ -34,6 +39,74 @@ describe("Entity Extraction", () => {
       // 4+ word proper nouns should not be extracted
       const longNames = entities.filter(e => e.split(" ").length > 3);
       expect(longNames.length).toBe(0);
+    });
+
+    it("should not extract status/process vocabulary as entities", () => {
+      const entities = extractEntitiesSync("Ticket moved to In Progress under Program Files cleanup.");
+      expect(entities).not.toContain("In Progress");
+      expect(entities).not.toContain("Program Files");
+    });
+
+    it("should strip leading sentence-position stopwords", () => {
+      const entities = extractEntitiesSync("The Cortex Proprioception module returned healthy.");
+      expect(entities).not.toContain("The Cortex Proprioception");
+      expect(entities).toContain("Cortex Proprioception");
+    });
+
+    it("should capture names with internal capitals whole", () => {
+      const entities = extractEntitiesSync("Lunch with Fiona McAllister next week.");
+      expect(entities).toContain("Fiona McAllister");
+      expect(entities).not.toContain("Fiona Mc");
+    });
+
+    it("should match SimsOnline known entities canonically", () => {
+      const entities = extractEntitiesSync("simsonline dedicatedserver probe passed on sunset valley save");
+      expect(entities).toContain("SimsOnline");
+      expect(entities).toContain("DedicatedServer");
+      expect(entities).toContain("Sunset Valley");
+    });
+  });
+
+  describe("refineProperNounPhrase", () => {
+    it("rejects blocklisted phrases", () => {
+      expect(refineProperNounPhrase("In Progress")).toBeNull();
+      expect(refineProperNounPhrase("Best Practices")).toBeNull();
+    });
+
+    it("strips leading stopwords and keeps the remainder", () => {
+      expect(refineProperNounPhrase("The Acme Corp")).toBe("Acme Corp");
+    });
+
+    it("rejects phrases that reduce below two words", () => {
+      expect(refineProperNounPhrase("In Phase")).toBeNull();
+      expect(refineProperNounPhrase("Runs Pterodactyl")).toBeNull();
+    });
+
+    it("keeps clean proper nouns unchanged", () => {
+      expect(refineProperNounPhrase("Sarah Johnson")).toBe("Sarah Johnson");
+    });
+  });
+
+  describe("isJunkStoredEntity", () => {
+    it("flags observed production junk", () => {
+      expect(isJunkStoredEntity("In Progress")).toBe(true);
+      expect(isJunkStoredEntity("Program Files")).toBe(true);
+      expect(isJunkStoredEntity("Agent Platform")).toBe(true);
+      expect(isJunkStoredEntity("The Cortex Proprioception")).toBe(true);
+    });
+
+    it("keeps real entities", () => {
+      expect(isJunkStoredEntity("Sarah Johnson")).toBe(false);
+      expect(isJunkStoredEntity("Sunset Valley")).toBe(false);
+      expect(isJunkStoredEntity("Git Bash")).toBe(false);
+      expect(isJunkStoredEntity("Live Mode")).toBe(false);
+    });
+
+    it("never touches single words or unusual casings", () => {
+      expect(isJunkStoredEntity("Cortex")).toBe(false);
+      expect(isJunkStoredEntity("rts_fps")).toBe(false);
+      expect(isJunkStoredEntity("s&box")).toBe(false);
+      expect(isJunkStoredEntity("ADR-001")).toBe(false);
     });
   });
 

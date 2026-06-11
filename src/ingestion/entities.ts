@@ -37,7 +37,81 @@ const KNOWN_ENTITIES: Record<string, string[]> = {
   "OrderRouter": ["orderrouter"],
   "PossessionRouter": ["possessionrouter"],
   "MatchManager": ["matchmanager"],
+  // — SimsOnline (dedicated authoritative server project) —
+  "SimsOnline": ["simsonline", "sims online"],
+  "DedicatedServer": ["dedicatedserver"],
+  "SimsOnlineServerHostMod": ["simsonlineserverhostmod", "serverhostmod"],
+  "The Sims 3": ["sims 3", "the sims", "ts3w.exe", "ts3"],
+  "Sunset Valley": ["sunset valley"],
+  "ObjectGuid": ["objectguid"],
+  "Fable 5": ["fable 5", "claude-fable"],
 };
+
+// Words that frequently start a Title-Case phrase only because of sentence
+// position or label formatting, not because they are part of a proper noun.
+// Stripped (repeatedly) from the front of regex-extracted phrases.
+const LEADING_STOPWORDS = new Set([
+  "the", "a", "an", "in", "on", "at", "of", "for", "to", "with", "from", "by",
+  "this", "that", "these", "those", "if", "when", "while", "after", "before",
+  "during", "and", "but", "or", "as", "is", "are", "was", "were", "not", "no",
+  "my", "our", "your", "his", "her", "its", "their", "it", "we", "you", "they",
+  "he", "she", "all", "each", "every", "some", "any", "more", "most", "other",
+  "into", "over", "under", "about", "via", "per", "vs", "last", "next",
+  "user", "use", "using", "used", "runs", "run", "running", "see", "also",
+  "then", "now", "here", "there", "what", "which", "who", "how", "why",
+  "where", "do", "does", "did", "done", "will", "would", "should", "could",
+  "may", "might", "must", "can", "cannot", "please", "note",
+]);
+
+// Exact phrases (lowercased) that pass the Title-Case shape test but are
+// process/status/filesystem vocabulary, not entities. Sourced from junk
+// observed in production entity arrays plus obvious generics.
+const JUNK_PHRASES = new Set([
+  "in progress", "work in progress", "program files", "dev work",
+  "agent platform", "active node", "process coordination", "rich sim",
+  "save gameplay", "player same", "in phase", "next steps", "open questions",
+  "known issues", "quick start", "getting started", "pull request",
+  "pull requests", "code review", "root cause", "action item", "action items",
+  "follow up", "status update", "high priority", "low priority",
+  "best practices", "edge case", "edge cases", "key insight",
+  "lessons learned", "final state", "current state", "live evidence",
+  "error message", "command line", "breaking change", "breaking changes",
+  "side effects", "file path",
+]);
+
+/**
+ * Refine a regex-extracted Title-Case phrase into an acceptable entity, or
+ * null if it is junk. Strips leading sentence-position stopwords, enforces
+ * the 2-3 word window, and rejects blocklisted process vocabulary.
+ */
+export function refineProperNounPhrase(phrase: string): string | null {
+  const words = phrase.trim().split(/\s+/);
+  while (words.length > 0 && LEADING_STOPWORDS.has(words[0].toLowerCase())) {
+    words.shift();
+  }
+  if (words.length < 2 || words.length > 3) return null;
+  if (words.every((w) => LEADING_STOPWORDS.has(w.toLowerCase()))) return null;
+  const joined = words.join(" ");
+  if (JUNK_PHRASES.has(joined.toLowerCase())) return null;
+  return joined;
+}
+
+/**
+ * Is a stored entity string junk under the current rules? Used by the
+ * cleanup backfill (scripts/cleanup-junk-entities.ts) to retro-filter entity
+ * arrays. Conservative: only strings shaped like regex-extracted Title-Case
+ * phrases are re-evaluated; known canonicals, single words, and unusual
+ * casings (rts_fps, s&box, ADR-001) are always kept.
+ */
+export function isJunkStoredEntity(entity: string): boolean {
+  const trimmed = entity.trim();
+  if (JUNK_PHRASES.has(trimmed.toLowerCase())) return true;
+  if (trimmed in KNOWN_ENTITIES) return false;
+  const titleCaseShape =
+    /^(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*)(?:\s+[A-Z][a-z]+(?:[A-Z][a-z]+)*){1,2}$/;
+  if (!titleCaseShape.test(trimmed)) return false;
+  return refineProperNounPhrase(trimmed) !== trimmed;
+}
 
 const USE_LLM_ENTITIES = process.env.CORTEX_LLM_ENTITIES === "true";
 
@@ -57,12 +131,21 @@ function extractEntitiesFast(text: string): string[] {
     }
   }
 
-  // Also extract capitalized multi-word phrases (proper nouns)
-  const properNouns = text.match(/(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/g);
+  // Also extract capitalized multi-word phrases (proper nouns).
+  // Words may contain internal capitals (McAllister, GameObject) so names
+  // like "Fiona McAllister" are captured whole instead of truncating at the
+  // internal capital ("Fiona Mc"). Each match is refined: leading
+  // sentence-position stopwords stripped, junk process vocabulary rejected.
+  // Separator is spaces/tabs only -- \s+ would merge Title words across
+  // line breaks into garbage entities ("Root Cause\n\nThe").
+  const properNouns = text.match(
+    /(?:[A-Z][a-z]+(?:[A-Z][a-z]+)*)(?:[ \t]+[A-Z][a-z]+(?:[A-Z][a-z]+)*)+/g
+  );
   if (properNouns) {
     for (const noun of properNouns) {
-      if (!found.has(noun) && noun.split(" ").length <= 3) {
-        found.add(noun);
+      const refined = refineProperNounPhrase(noun);
+      if (refined && !found.has(refined)) {
+        found.add(refined);
       }
     }
   }
