@@ -119,10 +119,13 @@ async function main() {
 
     out.push("---");
     out.push(
-      "Cortex MCP is wired in. Recall with `cortex_search` / `cortex_recall`. " +
-      "Capture decisions with `cortex_artifact` (type: decision/learning/correction/insight). " +
-      "Persist durable findings with `cortex_ingest`. Update stale beliefs with " +
-      "`cortex_reconsolidate` within the 1h labile window after recall."
+      "Cortex MCP is wired in - use the FULL loop, not just ingest: " +
+      "(1) `cortex_search`/`cortex_recall` BEFORE deciding or debugging; recalled memories are labile for 1h. " +
+      "(2) If new info updates something recalled, `cortex_reconsolidate` it - ingest REFUSES near-duplicates. " +
+      "(3) `cortex_ingest` only for genuinely novel facts. " +
+      "(4) Before a repeatable task, `cortex_skill_retrieve`; after applying a skill, `cortex_skill_executed`; improve with `cortex_skill_refine`. " +
+      "(5) Significant decisions: `cortex_reason` with honest confidence. " +
+      "(6) End of long turns: `cortex_journal`."
     );
 
     process.stdout.write(out.join("\n") + "\n");

@@ -65,7 +65,7 @@ async function resolveAgent(externalId: string): Promise<number> {
 // ─── Tool: cortex_search ────────────────────────────────
 server.tool(
   "cortex_search",
-  "Search CORTEX memory using hybrid scoring (semantic + text + recency + resonance + priority). Use this whenever you need to recall information from past conversations, files, transcripts, or any stored memory.",
+  "Search CORTEX memory using hybrid scoring (semantic + text + recency + resonance + priority). Use this whenever you need to recall information from past conversations, files, transcripts, or any stored memory. Recalled results enter a 1-hour LABILE window: if you then learn something that updates one of them, use cortex_reconsolidate on that memory id instead of ingesting a duplicate.",
   {
     query: z.string().describe("The search query"),
     agent_id: z
@@ -458,9 +458,13 @@ server.tool(
 // ─── Tool: cortex_ingest ────────────────────────────────
 server.tool(
   "cortex_ingest",
-  "Store new content into CORTEX memory. Automatically chunks, embeds, extracts entities, and forms synapses. Use this to save important information, decisions, learnings, or any content that should persist across sessions.",
+  "Store GENUINELY NOVEL content into CORTEX memory (chunks, embeds, extracts entities, forms synapses). Do NOT use this for updates, corrections, or extensions of things CORTEX already knows: search first, then cortex_reconsolidate the existing memory. Near-duplicate content is REFUSED with guidance (the similar memory is made labile so you can reconsolidate it immediately); pass force=true only after confirming the content is truly distinct.",
   {
     content: z.string().describe("The content to store in memory"),
+    force: z
+      .boolean()
+      .default(false)
+      .describe("Bypass the near-duplicate gate. Only use after a refusal, once you have confirmed the content is genuinely distinct from the flagged memory rather than an update to it."),
     agent_id: z
       .string()
       .default("arlo")
@@ -480,11 +484,48 @@ server.tool(
       .default("api")
       .describe("Source type (markdown, telegram, limitless, api)"),
   },
-  async ({ content, agent_id, source, priority, source_type }) => {
+  async ({ content, force, agent_id, source, priority, source_type }) => {
     const agentId = await resolveAgent(agent_id);
 
     const chunks = chunkText(content);
     const embeddings = await embedTexts(chunks.map((c) => c.text));
+
+    // ── Near-duplicate gate (Recall-and-Reconsolidate enforcement) ──
+    // Agents overwhelmingly ingest when they should reconsolidate (measured
+    // 2026-06-12: 72 agent ingests vs 13 reconsolidations in 7 days). Refuse
+    // single-chunk content that is nearly identical to an existing memory,
+    // make that memory labile, and point the caller at cortex_reconsolidate.
+    // Multi-chunk (file/bulk) ingests and force=true bypass the gate.
+    const DUP_THRESHOLD = Number(process.env.CORTEX_DUP_THRESHOLD || "0.88");
+    if (!force && chunks.length === 1) {
+      const embLiteral = `[${embeddings[0].join(",")}]`;
+      const dupResult = await db.execute(sql`
+        SELECT id, content, 1 - (embedding <=> ${embLiteral}::vector) AS similarity
+        FROM memory_nodes
+        WHERE agent_id = ${agentId} AND status = 'active' AND embedding IS NOT NULL
+        ORDER BY embedding <=> ${embLiteral}::vector
+        LIMIT 1
+      `);
+      const top = dupResult.rows[0] as
+        | { id: number; content: string; similarity: number }
+        | undefined;
+      if (top && Number(top.similarity) >= DUP_THRESHOLD) {
+        await markLabile([Number(top.id)]);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `NOT STORED - near-duplicate of memory #${top.id} (cosine similarity ${Number(top.similarity).toFixed(3)}, threshold ${DUP_THRESHOLD}).\n\n` +
+                `Existing memory #${top.id}: "${String(top.content).slice(0, 400)}"\n\n` +
+                `Memory #${top.id} is now LABILE for 1 hour. If your content updates, corrects, or extends it, ` +
+                `call cortex_reconsolidate(memory_id=${top.id}, new_content=<the merged, corrected text>) - that is the Recall-and-Reconsolidate loop. ` +
+                `Only if your content is genuinely distinct from the above, retry cortex_ingest with force=true.`,
+            },
+          ],
+        };
+      }
+    }
 
     const insertedIds: number[] = [];
     for (let i = 0; i < chunks.length; i++) {
@@ -1055,7 +1096,7 @@ server.tool(
 // ─── Tool: cortex_reconsolidate ─────────────────────────
 server.tool(
   "cortex_reconsolidate",
-  "Update a previously recalled memory with new information. The memory must have been recalled within the last hour (labile window). Use this to correct beliefs, update outdated information, or refine knowledge. The original content is preserved as an audit trail.",
+  "Update a previously recalled memory with new information. The memory must have been recalled within the last hour (labile window) - cortex_search/cortex_recall open the window, and cortex_labile lists current candidates. PREFER this over cortex_ingest whenever the new information updates, corrects, or extends something CORTEX already knows. The original content is preserved as an audit trail.",
   {
     agent_id: z.string().default("arlo").describe("Agent ID"),
     memory_id: z.number().describe("ID of the memory to update (must have been recently recalled)"),
@@ -1112,7 +1153,7 @@ server.tool(
 // ─── Tool: cortex_skill_store ────────────────────────────
 server.tool(
   "cortex_skill_store",
-  "Store a new procedural memory (skill, workflow, pattern, preference, or heuristic). Use this when you learn HOW to do something, identify a repeatable process, or discover a pattern that should be remembered as a capability.",
+  "Store a new procedural memory (skill, workflow, pattern, preference, or heuristic). Use this when you learn HOW to do something, identify a repeatable process, or discover a pattern that should be remembered as a capability. FIRST check cortex_skill_retrieve: if a similar skill exists, improve it with cortex_skill_refine instead of storing a variant. After applying any skill, record the outcome with cortex_skill_executed so proficiency tracking works.",
   {
     agent_id: z.string().default("arlo").describe("Agent ID"),
     name: z.string().describe("Short name for the skill/workflow (e.g., 'Client proposal writing')"),
