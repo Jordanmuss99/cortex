@@ -6,7 +6,8 @@ import { sql } from "drizzle-orm";
  *
  * Three connection types:
  * 1. Semantic: cosine similarity > 0.85 between node embeddings
- * 2. Entity: shared entity mentions between nodes
+ * 2. Entity: shared entity mentions, IDF-weighted by the rarest shared
+ *    entity (rare entity = strong evidence, hub entity = weak evidence)
  * 3. Temporal: same source file (co-located content)
  *
  * Batched: one discovery query per connection type for the whole ingest
@@ -132,32 +133,56 @@ export async function formSynapses(
   }
 
   // 2. Entity-based synapses -- one array-overlap query, capped per node.
+  //    Strength is IDF-weighted by the rarest shared entity: an entity that
+  //    appears in 2 memories is strong evidence they belong together (~0.69),
+  //    a hub entity mentioned across a third of the corpus is weak evidence
+  //    (floors at 0.3). weight = clamp(0.8 - 0.1 * ln(1 + df), 0.3, 0.8).
+  //    Previously every entity synapse was a flat 0.6, so hub entities wove
+  //    dense low-information cliques at the same strength as rare ones.
   try {
     const results = await db.execute(sql`
-      SELECT new_id, match_id FROM (
-        SELECT n.id AS new_id, m.id AS match_id,
-               ROW_NUMBER() OVER (PARTITION BY n.id ORDER BY m.id DESC) AS rn
-        FROM memory_nodes n
-        JOIN memory_nodes m
-          ON m.agent_id = ${agentId}
-         AND m.id != n.id
-         AND m.status = 'active'
-         AND m.entities && n.entities
-        WHERE n.id = ANY(${sql.raw(idsLiteral)})
-          AND n.entities IS NOT NULL
-          AND array_length(n.entities, 1) > 0
-      ) t
-      WHERE rn <= ${ENTITY_LIMIT_PER_NODE}
+      WITH entity_df AS (
+        SELECT unnest(entities) AS entity, COUNT(*) AS df
+        FROM memory_nodes
+        WHERE agent_id = ${agentId} AND status = 'active'
+        GROUP BY 1
+      ),
+      pairs AS (
+        SELECT new_id, match_id FROM (
+          SELECT n.id AS new_id, m.id AS match_id,
+                 ROW_NUMBER() OVER (PARTITION BY n.id ORDER BY m.id DESC) AS rn
+          FROM memory_nodes n
+          JOIN memory_nodes m
+            ON m.agent_id = ${agentId}
+           AND m.id != n.id
+           AND m.status = 'active'
+           AND m.entities && n.entities
+          WHERE n.id = ANY(${sql.raw(idsLiteral)})
+            AND n.entities IS NOT NULL
+            AND array_length(n.entities, 1) > 0
+        ) t
+        WHERE rn <= ${ENTITY_LIMIT_PER_NODE}
+      )
+      SELECT p.new_id, p.match_id,
+             MAX(GREATEST(0.3, LEAST(0.8, 0.8 - 0.1 * LN(1 + ed.df)))) AS similarity
+      FROM pairs p
+      JOIN memory_nodes n2 ON n2.id = p.new_id
+      JOIN memory_nodes m2 ON m2.id = p.match_id
+      JOIN entity_df ed
+        ON ed.entity = ANY(n2.entities)
+       AND ed.entity = ANY(m2.entities)
+      GROUP BY p.new_id, p.match_id
     `);
 
     const rows = dedupePairs(
       results.rows as unknown as DiscoveredPair[],
       "entity_shared",
-      () => 0.6,
+      (p) => Math.min(Math.max(Number(p.similarity ?? 0.3), 0.3), 0.8),
       0.01
     );
 
     synapsesCreated += await upsertSynapses(rows, {
+      connectionStrength: sql`GREATEST(memory_synapses.connection_strength, excluded.connection_strength)`,
       activationCount: sql`memory_synapses.activation_count + 1`,
       lastActivatedAt: sql`NOW()`,
     });
