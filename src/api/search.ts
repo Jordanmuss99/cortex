@@ -80,6 +80,8 @@ async function hybridSearch(
       WHERE agent_id = ${agentId}
         AND status = 'active'
         AND embedding IS NOT NULL
+        AND (valid_from IS NULL OR valid_from <= NOW())
+        AND (valid_until IS NULL OR valid_until > NOW())
     )
     SELECT vs.*,
       COALESCE(ev.recall_boost, 0) AS emotional_boost,

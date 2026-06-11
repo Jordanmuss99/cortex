@@ -120,6 +120,8 @@ server.tool(
         WHERE agent_id = ${agentId}
           AND status = 'active'
           AND embedding IS NOT NULL
+          AND (valid_from IS NULL OR valid_from <= NOW())
+          AND (valid_until IS NULL OR valid_until > NOW())
       )
       SELECT vs.*,
         COALESCE(ev.recall_boost, 0) AS emotional_boost,
@@ -243,6 +245,8 @@ server.tool(
           CASE priority WHEN 0 THEN 1.0 WHEN 1 THEN 0.8 WHEN 2 THEN 0.5 WHEN 3 THEN 0.3 ELSE 0.1 END AS priority_boost
         FROM memory_nodes
         WHERE agent_id = ${agentId} AND status = 'active' AND embedding IS NOT NULL
+          AND (valid_from IS NULL OR valid_from <= NOW())
+          AND (valid_until IS NULL OR valid_until > NOW())
       )
       SELECT vs.*,
         (0.45 * vs.cosine_sim + 0.18 * vs.text_match + 0.12 * vs.recency + 0.10 * vs.norm_resonance + 0.05 * vs.priority_boost + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
