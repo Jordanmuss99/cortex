@@ -23,6 +23,35 @@
 
 import http from "node:http";
 import { URL } from "node:url";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const COMPLIANCE_FILE = join(homedir(), ".cortex", "claude-loop-compliance.json");
+const COMPLIANCE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Previous session's Recall-and-Reconsolidate verdict, written by the
+// SessionEnd hook (cortex-session-end.mjs). Returns display lines when the
+// verdict is fresh and carries gaps; [] otherwise.
+async function loadComplianceLines() {
+  try {
+    const v = JSON.parse(await readFile(COMPLIANCE_FILE, "utf8"));
+    if (!Array.isArray(v.gaps) || v.gaps.length === 0) return [];
+    const endedAtMs = Date.parse(v.endedAt || "");
+    if (!Number.isFinite(endedAtMs) || Date.now() - endedAtMs > COMPLIANCE_MAX_AGE_MS) return [];
+    const vb = v.verbs || {};
+    return [
+      "## Previous session loop compliance (cortex-session-end hook)",
+      `Last recorded session (${v.endedAt}${v.cwd ? `, ${v.cwd}` : ""}) ended with Recall-and-Reconsolidate gaps:`,
+      ...v.gaps.map((g) => `- ${g}`),
+      `(stats: ${v.cortexCalls ?? 0}/${v.totalToolCalls ?? 0} cortex calls; reads ${vb.reads ?? 0}, ingests ${vb.ingests ?? 0}, reconsolidations ${vb.reconsolidations ?? 0}, skills r/s/x ${vb.skillRetrieve ?? 0}/${vb.skillStore ?? 0}/${vb.skillExecuted ?? 0})`,
+      "Correct this pattern THIS session: search before writing, reconsolidate over ingest, retrieve skills before tasks and record executions.",
+      "",
+    ];
+  } catch {
+    return [];
+  }
+}
 
 const BASE  = process.env.CORTEX_REST_BASE  || "http://127.0.0.1:3100";
 const AGENT = process.env.CORTEX_AGENT_ID   || "arlo";
@@ -74,6 +103,7 @@ const getJson  = (url, t) => httpRequest("GET",  url, undefined, t);
 const postJson = (url, b, t) => httpRequest("POST", url, b,      t);
 
 async function main() {
+  const complianceLines = await loadComplianceLines();
   try {
     const h = await getJson(`${BASE}/api/v1/health`, HEALTH_TIMEOUT_MS);
     if (!h.ok) throw new Error(`health ${h.status}`);
@@ -87,6 +117,7 @@ async function main() {
     const search = searchRes.status === "fulfilled" && searchRes.value.ok ? searchRes.value.json : null;
 
     const out = [];
+    out.push(...complianceLines);
     out.push("## Cortex session context (auto-loaded)");
     out.push("");
 
@@ -130,6 +161,9 @@ async function main() {
 
     process.stdout.write(out.join("\n") + "\n");
   } catch (e) {
+    // Stack down: still surface the previous session's verdict if any - the
+    // compliance feed-forward does not depend on Cortex being reachable.
+    if (complianceLines.length) process.stdout.write(complianceLines.join("\n") + "\n");
     process.stderr.write(`[cortex-session-start] skipped: ${e?.message || e}\n`);
   }
   // Explicit clean exit (libuv handles drain naturally with node:http).

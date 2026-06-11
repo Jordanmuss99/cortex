@@ -36,10 +36,28 @@ import { storeProcedural, retrieveProcedural, recordExecution, refineProcedural 
 import { eq, sql, desc, and } from "drizzle-orm";
 import "dotenv/config";
 
-const server = new McpServer({
-  name: "cortex-v2",
-  version: "0.1.0",
-});
+const server = new McpServer(
+  {
+    name: "cortex-v2",
+    version: "0.1.0",
+  },
+  {
+    // Delivered to every MCP client (Claude Desktop, Claude Code, OpenCode,
+    // OpenClaw) at connection time. For clients with no other protocol
+    // surface (Claude Desktop has no CLAUDE.md or hooks) this is the ONLY
+    // standing instruction channel, so it carries the full loop.
+    instructions: [
+      "Cortex is the agent's persistent cross-session memory. Follow the Recall-and-Reconsolidate loop:",
+      "1. Boot: call cortex_init at session start (skip if a Cortex context block was already auto-injected).",
+      "2. Recall before deciding: cortex_search / cortex_recall before architectural decisions, debugging, or repeating past work. Recalled memories become LABILE (updatable) for 1 hour.",
+      "3. Update over duplicate: if new information corrects or extends a recalled memory, call cortex_reconsolidate on that memory id. Do NOT ingest a near-duplicate; cortex_ingest REFUSES content too similar to an existing memory and tells you which memory to reconsolidate instead.",
+      "4. Ingest only genuinely novel facts, with canonical entity names (e.g. 'SimsOnline', 'Cortex', 'OpenCode') so synapses form correctly.",
+      "5. Skills: before a repeatable task, cortex_skill_retrieve; after applying one, cortex_skill_executed; improve with cortex_skill_refine instead of storing variants.",
+      "6. Record significant decisions with cortex_reason using an HONEST confidence (not 0.5 or 1.0); journal long sessions with cortex_journal.",
+      "Style: never write em-dash characters into Cortex-bound content; use '--' instead (the drift self-check counts em-dashes).",
+    ].join("\n"),
+  }
+);
 
 // Helper: resolve agent by external ID, create if missing
 async function resolveAgent(externalId: string): Promise<number> {
