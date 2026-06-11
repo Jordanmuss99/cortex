@@ -133,6 +133,8 @@ export async function initDatabase() {
   await client`CREATE INDEX IF NOT EXISTS idx_mn_embedding_hnsw ON memory_nodes USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`;
   // Index for resonance-based queries (dream pruning, consolidation)
   await client`CREATE INDEX IF NOT EXISTS idx_mn_agent_resonance ON memory_nodes(agent_id, resonance_score) WHERE status = 'active'`;
+  // GIN index for entity-overlap queries (batched synapse formation uses &&)
+  await client`CREATE INDEX IF NOT EXISTS idx_mn_entities ON memory_nodes USING GIN(entities)`;
 
   console.error("[db] pgvector extension enabled, schema migrations applied (v7: production indexes)");
 }
