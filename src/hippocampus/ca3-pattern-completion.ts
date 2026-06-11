@@ -89,21 +89,28 @@ export async function patternComplete(
     // (memories not in initial set but strongly connected to activated ones)
     if (iter === 0) {
       const expandedIds = new Set(memoryIds);
+      const newNeighborsToPull: Array<{ memId: number; neighborId: number; strength: number }> = [];
+
       for (const [memId] of activationScores) {
         const connections = synapseGraph.get(memId) || [];
         for (const conn of connections) {
           if (!expandedIds.has(conn.neighborId) && conn.strength > 0.5) {
-            // Pull in strongly connected neighbor
-            const neighborOverlap = await computeSingleOverlap(
-              conn.neighborId,
-              querySparse
-            );
-            newScores.set(
-              conn.neighborId,
-              neighborOverlap + RECURRENT_BETA * conn.strength * (activationScores.get(memId) || 0)
-            );
+            newNeighborsToPull.push({ memId, neighborId: conn.neighborId, strength: conn.strength });
             expandedIds.add(conn.neighborId);
           }
+        }
+      }
+
+      if (newNeighborsToPull.length > 0) {
+        const neighborIds = newNeighborsToPull.map(n => n.neighborId);
+        const overlapMap = await computeBatchOverlap(neighborIds, querySparse);
+
+        for (const pull of newNeighborsToPull) {
+          const neighborOverlap = overlapMap.get(pull.neighborId) || 0;
+          newScores.set(
+            pull.neighborId,
+            neighborOverlap + RECURRENT_BETA * pull.strength * (activationScores.get(pull.memId) || 0)
+          );
         }
       }
     }
@@ -205,34 +212,37 @@ async function findSparseOverlapMatches(
 }
 
 /**
- * Compute sparse overlap for a single stored memory against a query.
- * Used for pulling in neighbors during recurrent activation.
+ * Compute sparse overlap for a batch of stored memories against a query.
+ * Used for pulling in neighbors during recurrent activation without N+1 queries.
  */
-async function computeSingleOverlap(
-  memoryId: number,
+async function computeBatchOverlap(
+  memoryIds: number[],
   querySparse: SparseCode
-): Promise<number> {
+): Promise<Map<number, number>> {
+  const overlapMap = new Map<number, number>();
+  if (memoryIds.length === 0) return overlapMap;
+
+  const idsLiteral = `ARRAY[${memoryIds.join(",")}]::int[]`;
   const result = await db.execute(sql`
-    SELECT sparse_indices, sparse_values
+    SELECT memory_id, sparse_indices, sparse_values
     FROM hippocampal_codes
-    WHERE memory_id = ${memoryId}
-    LIMIT 1
+    WHERE memory_id = ANY(${sql.raw(idsLiteral)})
   `);
 
-  const rows = result.rows as Array<{
+  for (const row of result.rows as Array<{
+    memory_id: number;
     sparse_indices: number[];
     sparse_values: number[];
-  }>;
+  }>) {
+    const stored: SparseCode = {
+      indices: row.sparse_indices,
+      values: row.sparse_values,
+      dim: querySparse.dim,
+    };
+    overlapMap.set(Number(row.memory_id), sparseOverlap(querySparse, stored));
+  }
 
-  if (rows.length === 0) return 0;
-
-  const stored: SparseCode = {
-    indices: rows[0].sparse_indices,
-    values: rows[0].sparse_values,
-    dim: querySparse.dim,
-  };
-
-  return sparseOverlap(querySparse, stored);
+  return overlapMap;
 }
 
 /**

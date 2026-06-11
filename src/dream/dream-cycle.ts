@@ -510,19 +510,16 @@ async function phaseConsolidation(agentId: number): Promise<{
     });
     consolidations++;
 
-    // Strengthen intra-cluster synapses in batch (one query per cluster member)
-    for (const nodeId of cluster) {
-      const result = await db.execute(sql`
-        UPDATE memory_synapses
-        SET connection_strength = LEAST(connection_strength + 0.2, 1.0),
-            activation_count = activation_count + 1,
-            last_activated_at = NOW()
-        WHERE (memory_a = ${nodeId} OR memory_b = ${nodeId})
-          AND (memory_a IN (${sql.join(cluster.map(id => sql`${id}`), sql`,`)})
-            OR memory_b IN (${sql.join(cluster.map(id => sql`${id}`), sql`,`)}))
-      `);
-      synapsesStrengthened += Number((result as { rowCount?: number }).rowCount || 0);
-    }
+    // Strengthen intra-cluster synapses in one batched query
+    const result = await db.execute(sql`
+      UPDATE memory_synapses
+      SET connection_strength = LEAST(connection_strength + 0.2, 1.0),
+          activation_count = activation_count + 1,
+          last_activated_at = NOW()
+      WHERE memory_a IN (${sql.join(cluster.map(id => sql`${id}`), sql`,`)})
+        AND memory_b IN (${sql.join(cluster.map(id => sql`${id}`), sql`,`)})
+    `);
+    synapsesStrengthened += Number((result as { rowCount?: number }).rowCount || 0);
 
     insights.push({
       type: "consolidation",
@@ -567,12 +564,16 @@ async function phaseFreeAssociation(agentId: number): Promise<{
     LIMIT 50
   `);
 
-  const nodes = randomNodes.rows as Array<{
+  const rawNodes = randomNodes.rows as Array<{
     id: number;
     content: string;
-    embedding: string;
+    embedding: string | number[];
     entities: string[];
   }>;
+  const nodes = rawNodes.map(n => ({
+    ...n,
+    embeddingVec: typeof n.embedding === 'string' ? JSON.parse(n.embedding) as number[] : n.embedding as number[]
+  }));
 
   if (nodes.length < 2) {
     return { nodesActivated: 0, novelSynapses: 0, insights };
@@ -600,16 +601,18 @@ async function phaseFreeAssociation(agentId: number): Promise<{
     const nodeA = nodes[i];
     const nodeB = nodes[j];
 
-    // Compute cosine similarity via pgvector
-    const [simResult] = (
-      await db.execute(sql`
-      SELECT 1 - (a.embedding <=> b.embedding) AS similarity
-      FROM memory_nodes a, memory_nodes b
-      WHERE a.id = ${nodeA.id} AND b.id = ${nodeB.id}
-    `)
-    ).rows as Array<{ similarity: number }>;
-
-    const similarity = simResult?.similarity || 0;
+    // Compute cosine similarity locally in memory
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    const vecA = nodeA.embeddingVec;
+    const vecB = nodeB.embeddingVec;
+    for (let k = 0; k < vecA.length; k++) {
+      dotProduct += vecA[k] * vecB[k];
+      normA += vecA[k] * vecA[k];
+      normB += vecB[k] * vecB[k];
+    }
+    const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB) || 1e-10);
 
     // Novel connection range: 0.6-0.85
     // (too low = unrelated, too high = already connected or obvious)

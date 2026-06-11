@@ -104,14 +104,14 @@ export function dgEncode(denseEmbedding: number[]): SparseCode {
   const W = getProjectionMatrix();
 
   // Step 1: Random projection — z = W^T * x
+  // Optimized: Iterate in row-major order to maximize CPU cache locality
   const z = new Float32Array(EXPANDED_DIM);
-  for (let j = 0; j < EXPANDED_DIM; j++) {
-    let sum = 0;
-    const offset = j; // column-major: W[i][j] = W[i * EXPANDED_DIM + j]
-    for (let i = 0; i < INPUT_DIM; i++) {
-      sum += denseEmbedding[i] * W[i * EXPANDED_DIM + offset];
+  for (let i = 0; i < INPUT_DIM; i++) {
+    const val = denseEmbedding[i];
+    const offset = i * EXPANDED_DIM;
+    for (let j = 0; j < EXPANDED_DIM; j++) {
+      z[j] += val * W[offset + j];
     }
-    z[j] = sum;
   }
 
   // Step 2: ReLU — enforce non-negative activations

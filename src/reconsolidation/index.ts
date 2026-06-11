@@ -100,7 +100,8 @@ export async function reconsolidate(
 ): Promise<ReconsolidationResult> {
   // Step 1: Verify memory exists and is labile
   const memResult = await db.execute(sql`
-    SELECT id, agent_id, content, source, priority, resonance_score, last_recalled_at
+    SELECT id, agent_id, content, source, priority, resonance_score, last_recalled_at,
+           EXTRACT(EPOCH FROM (NOW() - last_recalled_at)) * 1000 AS ms_since_recall
     FROM memory_nodes
     WHERE id = ${memoryId}
       AND status = 'active'
@@ -115,6 +116,7 @@ export async function reconsolidate(
     priority: number;
     resonance_score: number;
     last_recalled_at: Date | null;
+    ms_since_recall: string | number | null;
   }>;
 
   if (rows.length === 0) {
@@ -124,13 +126,13 @@ export async function reconsolidate(
   const memory = rows[0];
 
   // Check labile window
-  if (!memory.last_recalled_at) {
+  if (!memory.last_recalled_at || memory.ms_since_recall === null) {
     return { memoryId, status: "not_labile", resonanceBoost: 0 };
   }
 
-  const recalledAt = new Date(memory.last_recalled_at).getTime();
-  const now = Date.now();
-  if (now - recalledAt > LABILE_WINDOW_MS) {
+  const msSinceRecall = Number(memory.ms_since_recall);
+  if (msSinceRecall > LABILE_WINDOW_MS || msSinceRecall < -60000) {
+    // If it's negative (due to minor clock skew), allow it. If > 1hr, window closed.
     return { memoryId, status: "window_closed", resonanceBoost: 0 };
   }
 

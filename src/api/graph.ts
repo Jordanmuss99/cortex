@@ -189,7 +189,11 @@ router.get("/", async (req: Request, res: Response) => {
       const tags = n.semantic_tags || [];
       const content = n.content || '';
       const category = classifyCategory(tags, content, n.source_type || 'markdown');
-      const ageDays = Math.floor((now - new Date(n.created_at).getTime()) / 86400000);
+      
+      const createdAtMs = typeof n.created_at === 'string' && !n.created_at.includes('Z') 
+        ? new Date(n.created_at + 'Z').getTime() 
+        : new Date(n.created_at).getTime();
+      const ageDays = Math.floor((now - createdAtMs) / 86400000);
 
       return {
         id: n.id,

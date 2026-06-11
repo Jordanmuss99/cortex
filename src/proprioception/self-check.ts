@@ -11,8 +11,9 @@ import { db, schema } from "../db/index.js";
 import { eq, sql, desc, gte } from "drizzle-orm";
 import { readFile, access } from "fs/promises";
 import { join } from "path";
+import { homedir } from "os";
 
-const OPENCLAW_DIR = join(process.env.HOME || "", ".openclaw");
+const OPENCLAW_DIR = join(homedir(), ".openclaw");
 const SKILLS_DIR = join(OPENCLAW_DIR, "skills");
 const CRON_FILE = join(OPENCLAW_DIR, "cron", "jobs.json");
 const CONFIG_FILE = join(OPENCLAW_DIR, "openclaw.json");
@@ -146,7 +147,6 @@ async function checkDrift(agentId: number): Promise<{
   emDashCount: number;
   unauthorizedActions: number;
 }> {
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const indicators: string[] = [];
   let sycophancyFlags = 0;
   let emDashCount = 0;
@@ -259,14 +259,25 @@ async function checkCognitiveIntegrity(agentId: number): Promise<{
 
   // Learning rate: when was the last procedural memory created?
   const lastProcResult = await db.execute(sql`
-    SELECT MAX(created_at) AS last_created
+    SELECT MAX(created_at) AS last_created,
+           EXTRACT(EPOCH FROM (NOW() - MAX(created_at))) * 1000 AS ms_since_last_proc
     FROM procedural_memories
     WHERE agent_id = ${agentId} AND status = 'active'
   `);
-  const lastProc = (lastProcResult.rows[0] as { last_created: string | null })?.last_created;
-  const lastProceduralLearning = lastProc ? new Date(lastProc).toISOString() : null;
-  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const learningStall = !lastProc || new Date(lastProc).getTime() < sevenDaysAgo;
+  const procRow = lastProcResult.rows[0] as any;
+  const lastProc = procRow?.last_created;
+  // Note: we just pass the raw string if possible, or append Z if we want accurate ISO
+  // But Drizzle sometimes returns a Date. If it's a string, append Z.
+  let lastProceduralLearning = null;
+  if (lastProc) {
+    lastProceduralLearning = typeof lastProc === 'string' && !lastProc.includes('Z') 
+      ? new Date(lastProc + 'Z').toISOString() 
+      : new Date(lastProc).toISOString();
+  }
+  
+  const msSinceLastProc = procRow?.ms_since_last_proc !== null ? Number(procRow.ms_since_last_proc) : Infinity;
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const learningStall = !lastProc || msSinceLastProc > sevenDaysMs;
   if (learningStall) {
     alerts.push("Learning stall: no new procedural memories in 7+ days");
   }

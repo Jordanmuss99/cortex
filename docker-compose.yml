@@ -27,6 +27,8 @@ services:
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
     ports:
       - "127.0.0.1:3100:3100"
+    volumes:
+      - ~/.openclaw:/root/.openclaw
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -43,6 +45,10 @@ services:
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - ~/.openclaw:/root/.openclaw
+    stdin_open: true
+    tty: true
     command: ["npx", "-y", "supergateway", "--stdio", "npx tsx src/mcp/server.ts", "--port", "8000"]
 
 

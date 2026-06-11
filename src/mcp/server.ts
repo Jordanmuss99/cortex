@@ -30,7 +30,7 @@ import { getRelationship, listRelationships, updateRelationship, addOpenItem, fo
 import { storeReasoningTrace } from "../metacognition/reasoning.js";
 import { runWeeklyAudit, formatAuditResult } from "../metacognition/audit.js";
 import { writeInnerMonologue, getRecentMonologue, formatMonologue } from "../metacognition/inner-monologue.js";
-import { reconsolidate, getLabileMemories } from "../reconsolidation/index.js";
+import { reconsolidate, getLabileMemories, markLabile } from "../reconsolidation/index.js";
 import { storeProcedural, retrieveProcedural, recordExecution, refineProcedural } from "../procedural/index.js";
 import { eq, sql, desc, and } from "drizzle-orm";
 import "dotenv/config";
@@ -134,7 +134,7 @@ server.tool(
       LIMIT ${limit}
     `);
 
-    // Update access counts (telemetry — best-effort, non-fatal).
+    // Update access counts (telemetry) AND open the reconsolidation window.
     // NOTE (2026-04-10): Uses sql.raw with an explicit ARRAY literal because
     // drizzle-orm serializes JS number arrays as PostgreSQL composite ROW(...)
     // types which Postgres refuses to cast to int[] ("cannot cast type record
@@ -151,8 +151,10 @@ server.tool(
               last_accessed_at = NOW()
           WHERE id = ANY(${sql.raw(idsLiteral)})
         `);
+        // Bugfix #5: Actually trigger the neuroscience reconsolidation loop
+        await markLabile(resultIds);
       } catch (err) {
-        console.error("[cortex_search] access count update failed (non-fatal):", err);
+        console.error("[cortex_search] access count or markLabile failed:", err);
       }
     }
 
@@ -248,6 +250,16 @@ server.tool(
       ORDER BY hybrid_score DESC
       LIMIT 50
     `);
+
+    // Bugfix #5: Open the reconsolidation window for recalled memories
+    const resultIds = (results.rows as Array<{ id: number }>).map((r) => r.id);
+    if (resultIds.length > 0) {
+      try {
+        await markLabile(resultIds);
+      } catch (err) {
+        console.error("[cortex_recall] markLabile failed:", err);
+      }
+    }
 
     // Also get recent cognitive artifacts
     const artifacts = await db
@@ -989,7 +1001,7 @@ server.tool(
     })).optional().describe("Options that were considered"),
     chosen: z.string().describe("Which option was chosen"),
     rationale: z.string().describe("Why this option was chosen"),
-    confidence: z.number().min(0).max(1).default(0.5).describe("Confidence in the decision (0-1)"),
+    confidence: z.number().min(0).max(1).describe("HONEST Confidence in the decision (0.0 to 1.0). DO NOT default to 0.5 or 1.0. Cortex uses this to audit your metacognitive bias."),
     reversible: z.boolean().default(true).describe("Is this decision easily reversible?"),
     impacts: z.array(z.string()).default([]).describe("Expected impacts"),
   },
