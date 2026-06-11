@@ -12,6 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { db, schema, initDatabase } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { embedQuery } from "../ingestion/embeddings.js";
 import { chunkText, countTokens } from "../ingestion/chunker.js";
 import { embedTexts } from "../ingestion/embeddings.js";
@@ -773,7 +774,7 @@ server.tool(
       .values({
         agentId,
         artifactType: artifact_type,
-        content,
+        content: scrubEmDashes(content),
         sessionId: session_id,
         resonanceScore: 5.0,
       })

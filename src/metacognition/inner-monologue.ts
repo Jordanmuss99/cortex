@@ -5,6 +5,7 @@
  * as P2 cognitive artifacts.
  */
 import { db, schema } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, desc, and, gte } from "drizzle-orm";
 
 export async function writeInnerMonologue(
@@ -17,11 +18,11 @@ export async function writeInnerMonologue(
     .values({
       agentId,
       artifactType: "inner_monologue",
-      content: {
+      content: scrubEmDashes({
         thought: content,
         context: context || null,
         timestamp: new Date().toISOString(),
-      },
+      }),
       resonanceScore: 4.0,
     })
     .returning({ id: schema.cognitiveArtifacts.id });

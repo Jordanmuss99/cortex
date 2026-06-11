@@ -22,6 +22,7 @@
  */
 
 import { db, schema } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, sql, and, gt } from "drizzle-orm";
 import { embedTexts } from "../ingestion/embeddings.js";
 import { extractEntitiesSync as extractEntities, extractSemanticTags } from "../ingestion/entities.js";
@@ -149,13 +150,13 @@ export async function reconsolidate(
     .values({
       agentId: memory.agent_id,
       artifactType: "correction",
-      content: {
+      content: scrubEmDashes({
         memoryId: memory.id,
         originalContent: memory.content,
         newContent,
         reason,
         reconsolidatedAt: new Date().toISOString(),
-      },
+      }),
       resonanceScore: 3.0,
     })
     .returning({ id: schema.cognitiveArtifacts.id });

@@ -1,4 +1,5 @@
 import { db, schema } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, sql } from "drizzle-orm";
 import { sparseOverlap } from "../hippocampus/index.js";
 import type { SparseCode } from "../hippocampus/types.js";
@@ -497,7 +498,7 @@ async function phaseConsolidation(agentId: number): Promise<{
     await db.insert(schema.cognitiveArtifacts).values({
       agentId,
       artifactType: "insight",
-      content: {
+      content: scrubEmDashes({
         type: "consolidation",
         summary,
         memberCount: clusterNodes.length,
@@ -505,7 +506,7 @@ async function phaseConsolidation(agentId: number): Promise<{
         entities: allEntities.slice(0, 30),
         tags: allTags.slice(0, 15),
         avgResonance,
-      },
+      }),
       resonanceScore: avgResonance,
     });
     consolidations++;
@@ -779,13 +780,13 @@ export async function phaseSynthesis(
     await db.insert(schema.cognitiveArtifacts).values({
       agentId,
       artifactType: "synthesis",
-      content: {
+      content: scrubEmDashes({
         nodeA: { id: row.memory_a, summary: summaryA },
         nodeB: { id: row.memory_b, summary: summaryB },
         connection,
         implication,
         actionable: shared.length > 0,
-      },
+      }),
       resonanceScore: 5.0,
     });
 

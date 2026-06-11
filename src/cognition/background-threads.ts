@@ -7,6 +7,7 @@
  * - Relational: contact freshness, pending follow-ups
  */
 import { db, schema } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, sql, desc, and } from "drizzle-orm";
 import { readFile } from "fs/promises";
 import { join } from "path";
@@ -109,7 +110,7 @@ export async function runStrategicThread(agentId: number): Promise<ThreadResult>
   await db.insert(schema.cognitiveArtifacts).values({
     agentId,
     artifactType: "background_thread",
-    content: { threadType: "strategic", ...result, timestamp: new Date().toISOString() },
+    content: scrubEmDashes({ threadType: "strategic", ...result, timestamp: new Date().toISOString() }),
     resonanceScore: 5.0,
   });
 
@@ -182,7 +183,7 @@ export async function runOperationalThread(agentId: number): Promise<ThreadResul
   await db.insert(schema.cognitiveArtifacts).values({
     agentId,
     artifactType: "background_thread",
-    content: { threadType: "operational", ...result, timestamp: new Date().toISOString() },
+    content: scrubEmDashes({ threadType: "operational", ...result, timestamp: new Date().toISOString() }),
     resonanceScore: 5.0,
   });
 
@@ -270,7 +271,7 @@ export async function runRelationalThread(agentId: number): Promise<ThreadResult
   await db.insert(schema.cognitiveArtifacts).values({
     agentId,
     artifactType: "background_thread",
-    content: { threadType: "relational", ...result, timestamp: new Date().toISOString() },
+    content: scrubEmDashes({ threadType: "relational", ...result, timestamp: new Date().toISOString() }),
     resonanceScore: 5.0,
   });
 

@@ -8,6 +8,7 @@
  * - SOUL.md / PRIME-CONTEXT.md alignment
  */
 import { db, schema } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, desc, and, gte, sql } from "drizzle-orm";
 import { readFile } from "fs/promises";
 import { join } from "path";
@@ -174,7 +175,7 @@ export async function runWeeklyAudit(agentId: number, period?: string, force = f
   await db.insert(schema.cognitiveArtifacts).values({
     agentId,
     artifactType: "audit",
-    content: result,
+    content: scrubEmDashes(result),
     resonanceScore: 6.0,
   });
 
@@ -193,7 +194,7 @@ export async function runWeeklyAudit(agentId: number, period?: string, force = f
     await db.insert(schema.cognitiveArtifacts).values({
       agentId,
       artifactType: "audit_feedback",
-      content: {
+      content: scrubEmDashes({
         type: "audit_feedback",
         period: periodLabel,
         feedbackContent,
@@ -201,7 +202,7 @@ export async function runWeeklyAudit(agentId: number, period?: string, force = f
         patternCount: patterns.length,
         actionRequired: recommendations.length > 0,
         timestamp: new Date().toISOString(),
-      },
+      }),
       // High resonance — ensures this surfaces in future cortex_init
       resonanceScore: 8.0,
     });

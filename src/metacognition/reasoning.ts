@@ -5,6 +5,7 @@
  * including options considered, rationale, and confidence.
  */
 import { db, schema } from "../db/index.js";
+import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, desc, and } from "drizzle-orm";
 
 interface ReasoningTrace {
@@ -24,10 +25,10 @@ export async function storeReasoningTrace(agentId: number, trace: ReasoningTrace
     .values({
       agentId,
       artifactType: "reasoning_trace",
-      content: {
+      content: scrubEmDashes({
         ...trace,
         timestamp: new Date().toISOString(),
-      },
+      }),
       resonanceScore: Math.max(5.0, trace.confidence * 8),
     })
     .returning({ id: schema.cognitiveArtifacts.id });
