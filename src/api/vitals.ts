@@ -1,4 +1,7 @@
 import { Router, Request, Response } from "express";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { db } from "../db/index.js";
 import { sql } from "drizzle-orm";
 
@@ -56,20 +59,43 @@ const THRESHOLD_DEFAULTS = {
   streakWarn: 3,
   expiredGraceMinutes: 10,
 };
-function loadThresholds(): typeof THRESHOLD_DEFAULTS {
-  const raw = process.env.CORTEX_VITALS_THRESHOLDS;
-  if (!raw) return { ...THRESHOLD_DEFAULTS };
+// Hot-reload config file, re-read on every request so edits apply WITHOUT a
+// container restart (env vars are frozen at container creation; this file is
+// not). Container path is mounted from the host's ~/.cortex/config by
+// docker-compose; host-side runs resolve the same file directly.
+// Precedence: defaults < CORTEX_VITALS_THRESHOLDS env < config file.
+const THRESHOLD_FILE_CANDIDATES = [
+  process.env.CORTEX_VITALS_THRESHOLDS_FILE,
+  "/app/config/vitals-thresholds.json",
+  join(homedir(), ".cortex", "config", "vitals-thresholds.json"),
+].filter(Boolean) as string[];
+
+function mergeNumeric(base: typeof THRESHOLD_DEFAULTS, raw: string, label: string): typeof THRESHOLD_DEFAULTS {
   try {
     const o = JSON.parse(raw);
-    const merged: any = { ...THRESHOLD_DEFAULTS };
+    const merged: any = { ...base };
     for (const k of Object.keys(THRESHOLD_DEFAULTS)) {
       if (typeof o[k] === "number" && Number.isFinite(o[k])) merged[k] = o[k];
     }
     return merged;
   } catch (e) {
-    console.error("[vitals] CORTEX_VITALS_THRESHOLDS is not valid JSON - using defaults:", (e as Error).message);
-    return { ...THRESHOLD_DEFAULTS };
+    console.error(`[vitals] ${label} is not valid JSON - ignored:`, (e as Error).message);
+    return { ...base };
   }
+}
+
+function loadThresholds(): typeof THRESHOLD_DEFAULTS {
+  let t = { ...THRESHOLD_DEFAULTS };
+  const envRaw = process.env.CORTEX_VITALS_THRESHOLDS;
+  if (envRaw) t = mergeNumeric(t, envRaw, "CORTEX_VITALS_THRESHOLDS");
+  for (const path of THRESHOLD_FILE_CANDIDATES) {
+    try {
+      const fileRaw = readFileSync(path, "utf-8");
+      t = mergeNumeric(t, fileRaw, path);
+      break; // first readable file wins
+    } catch { /* candidate absent - try next */ }
+  }
+  return t;
 }
 
 router.get("/", async (req: Request, res: Response) => {

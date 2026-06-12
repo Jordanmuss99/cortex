@@ -33,6 +33,9 @@ services:
       - "127.0.0.1:3100:3100"
     volumes:
       - ~/.openclaw:/root/.openclaw
+      # Hot-reload tunables (vitals-thresholds.json) - edited on the host,
+      # re-read per request, no restart needed.
+      - ~/.cortex/config:/app/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
