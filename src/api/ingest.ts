@@ -50,6 +50,41 @@ router.post("/", async (req: Request, res: Response) => {
     // Embed all chunks
     const embeddings = await embedTexts(chunks.map((c) => c.text));
 
+    // ── Near-duplicate SKIP gate (machine path: skip, don't refuse) ──
+    // The nightly reflect pipeline re-mines resumed transcripts and re-POSTs
+    // the same insights (8 verbatim dup pairs landed 06-10/06-11 this way),
+    // and the bridge can re-mirror a breadcrumb across sessions. Automation
+    // cannot act on refusal guidance, so unlike the MCP gate this silently
+    // returns the existing memory id as the canonical target. Body force:true
+    // bypasses; multi-chunk (file/bulk) ingests are exempt.
+    const DUP_THRESHOLD = Number(process.env.CORTEX_DUP_THRESHOLD || "0.88");
+    if (!req.body.force && chunks.length === 1) {
+      const embLiteral = `[${embeddings[0].join(",")}]`;
+      const dup = await db.execute(sql`
+        SELECT id, 1 - (embedding <=> ${embLiteral}::vector) AS similarity
+        FROM memory_nodes
+        WHERE agent_id = ${agent.id} AND status = 'active' AND embedding IS NOT NULL
+        ORDER BY embedding <=> ${embLiteral}::vector
+        LIMIT 1
+      `);
+      const top = dup.rows[0] as { id: number; similarity: number } | undefined;
+      if (top && Number(top.similarity) >= DUP_THRESHOLD) {
+        console.error(
+          `[ingest] skipped near-duplicate of #${top.id} (sim ${Number(top.similarity).toFixed(3)}) from ${sourceType}:${source || "?"}`
+        );
+        res.json({
+          agentId,
+          chunksStored: 0,
+          nodeIds: [],
+          synapsesFormed: 0,
+          skipped: true,
+          duplicateOf: Number(top.id),
+          similarity: Number(top.similarity),
+        });
+        return;
+      }
+    }
+
     // Store chunks with surprise-gated resonance
     const insertedIds: number[] = [];
     for (let i = 0; i < chunks.length; i++) {
