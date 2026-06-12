@@ -54,6 +54,7 @@ const server = new McpServer(
       "4. Ingest only genuinely novel facts, with canonical entity names (e.g. 'SimsOnline', 'Cortex', 'OpenCode') so synapses form correctly.",
       "5. Skills: before a repeatable task, cortex_skill_retrieve; after applying one, cortex_skill_executed; improve with cortex_skill_refine instead of storing variants.",
       "6. Record significant decisions with cortex_reason using an HONEST confidence (not 0.5 or 1.0); journal long sessions with cortex_journal.",
+      "7. State awareness: when the principal's recent messages show CLEAR state signals (frustration, fatigue, time pressure, rapid-fire terseness), call cortex_assess_state with those messages and adapt to the returned communication guidance. Skip it on sparse or neutral signal: few good assessments beat many noisy ones.",
       "Style: never write em-dash characters into Cortex-bound content; use '--' instead (the drift self-check counts em-dashes).",
     ].join("\n"),
   }
@@ -899,7 +900,7 @@ server.tool(
 // ─── Tool: cortex_assess_state (Phase 2) ──────────────
 server.tool(
   "cortex_assess_state",
-  "Assess the principal's current state (energy, stress, focus) from recent message patterns and context. Returns communication guidance.",
+  "Assess the principal's current state (energy, stress, focus) from recent message patterns and context. Returns communication guidance the CALLING session should immediately adapt to (pacing, brevity, decision load), and records the assessment for trend history. Call this when the principal's recent messages show CLEAR state signals (frustration, fatigue, time pressure, rapid-fire terseness) - pass their messages verbatim in recent_messages. Do NOT call it on sparse or neutral signal: few good assessments beat many noisy ones.",
   {
     agent_id: z.string().default("arlo").describe("Agent ID"),
     recent_messages: z.array(z.string()).describe("Recent messages from the principal to analyze"),

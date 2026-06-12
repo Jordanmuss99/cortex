@@ -156,7 +156,8 @@ async function main() {
       "(3) `cortex_ingest` only for genuinely novel facts. " +
       "(4) Before a repeatable task, `cortex_skill_retrieve`; after applying a skill, `cortex_skill_executed`; improve with `cortex_skill_refine`. " +
       "(5) Significant decisions: `cortex_reason` with honest confidence. " +
-      "(6) End of long turns: `cortex_journal`."
+      "(6) End of long turns: `cortex_journal`. " +
+      "(7) CLEAR principal state signals (frustration, fatigue, time pressure): `cortex_assess_state` with their recent messages, adapt to the guidance; skip on sparse signal."
     );
 
     process.stdout.write(out.join("\n") + "\n");
