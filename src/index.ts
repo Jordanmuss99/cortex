@@ -10,6 +10,7 @@ import { reconsolidateRouter } from "./api/reconsolidate.js";
 import { proceduralRouter } from "./api/procedural.js";
 import { graphRouter } from "./api/graph.js";
 import { cognitionRouter } from "./api/cognition.js";
+import { vitalsRouter } from "./api/vitals.js";
 import { dreamRouter } from "./api/dream.js";
 
 const app = express();
@@ -27,6 +28,7 @@ app.use("/api/v1/reconsolidate", reconsolidateRouter);
 app.use("/api/v1/procedural", proceduralRouter);
 app.use("/api/v1/graph", graphRouter);
 app.use("/api/v1/cognition", cognitionRouter);
+app.use("/api/v1/vitals", vitalsRouter);
 app.use("/api/v1/dream", dreamRouter);
 app.use("/api/v1", healthRouter);
 
