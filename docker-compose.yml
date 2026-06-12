@@ -25,6 +25,10 @@ services:
       VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      # Tunables: dedup gate threshold + vitals warning-rule overrides (JSON).
+      # Set either in .env; effective vitals values are echoed by /api/v1/vitals.
+      CORTEX_DUP_THRESHOLD: "${CORTEX_DUP_THRESHOLD:-}"
+      CORTEX_VITALS_THRESHOLDS: "${CORTEX_VITALS_THRESHOLDS:-}"
     ports:
       - "127.0.0.1:3100:3100"
     volumes:
@@ -43,6 +47,8 @@ services:
       VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      CORTEX_DUP_THRESHOLD: "${CORTEX_DUP_THRESHOLD:-}"
+      CORTEX_VITALS_THRESHOLDS: "${CORTEX_VITALS_THRESHOLDS:-}"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

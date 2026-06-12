@@ -28,6 +28,50 @@ interface Warning {
   detail: string;
 }
 
+// ── Tunable thresholds ──
+// Defaults match the self-check semantics where one exists. Override any
+// subset via the CORTEX_VITALS_THRESHOLDS env var as JSON, e.g.
+//   CORTEX_VITALS_THRESHOLDS={"dreamWarnHours":40,"orphansWarn":50}
+// (set it in .env; docker-compose passes it through). The effective values
+// are echoed in the response payload as `thresholds`.
+const THRESHOLD_DEFAULTS = {
+  dupThreshold: Number(process.env.CORTEX_DUP_THRESHOLD || 0.88), // legacy env honored as default
+  dupScanLimit: 200,
+  emdashBoundary: 5,
+  emdashCritical: 6,
+  dreamWarnHours: 30,
+  dreamCriticalHours: 72,
+  reflectInfoHours: 48,
+  reflectWarnHours: 96,
+  threadsWarnHours: 72,
+  synapseWarn: 0.25,
+  synapseCritical: 0.15,
+  hcWarn: 50,
+  valenceInfo: 25,
+  orphansWarn: 100,
+  ratioMinIngests: 10,
+  ratioFactor: 6,
+  spikeMin: 10,
+  spikeFactor: 3,
+  streakWarn: 3,
+  expiredGraceMinutes: 10,
+};
+function loadThresholds(): typeof THRESHOLD_DEFAULTS {
+  const raw = process.env.CORTEX_VITALS_THRESHOLDS;
+  if (!raw) return { ...THRESHOLD_DEFAULTS };
+  try {
+    const o = JSON.parse(raw);
+    const merged: any = { ...THRESHOLD_DEFAULTS };
+    for (const k of Object.keys(THRESHOLD_DEFAULTS)) {
+      if (typeof o[k] === "number" && Number.isFinite(o[k])) merged[k] = o[k];
+    }
+    return merged;
+  } catch (e) {
+    console.error("[vitals] CORTEX_VITALS_THRESHOLDS is not valid JSON - using defaults:", (e as Error).message);
+    return { ...THRESHOLD_DEFAULTS };
+  }
+}
+
 router.get("/", async (req: Request, res: Response) => {
   try {
     const agentExt = (req.query.agentId as string) || "arlo";
@@ -39,6 +83,7 @@ router.get("/", async (req: Request, res: Response) => {
       return;
     }
     const agentId = (agentResult.rows[0] as { id: number }).id;
+    const T = loadThresholds();
 
     // ── Daily write/activity series (14 days) ──
     // Independent reads: run concurrently (review finding: serial awaits
@@ -139,7 +184,7 @@ router.get("/", async (req: Request, res: Response) => {
         (SELECT COUNT(*) FROM memory_nodes WHERE agent_id = ${agentId} AND status = 'active'
            AND last_recalled_at > NOW() - INTERVAL '1 hour') AS labile_now,
         (SELECT COUNT(*) FROM memory_nodes WHERE agent_id = ${agentId} AND status = 'active'
-           AND valid_until IS NOT NULL AND valid_until < NOW() - INTERVAL '10 minutes') AS expired_active,
+           AND valid_until IS NOT NULL AND valid_until < NOW() - (${T.expiredGraceMinutes} * INTERVAL '1 minute')) AS expired_active,
         (SELECT COALESCE(SUM(length(c) - length(replace(c, chr(8212), ''))), 0) FROM
            (SELECT CASE WHEN artifact_type = 'synthesis'
                         THEN COALESCE(content->>'implication', '') || COALESCE(content->>'connection', '')
@@ -168,7 +213,7 @@ router.get("/", async (req: Request, res: Response) => {
         WHERE agent_id = ${agentId} AND created_at > NOW() - INTERVAL '7 days'
           AND embedding IS NOT NULL AND status = 'active'
         ORDER BY created_at DESC
-        LIMIT 200
+        LIMIT ${T.dupScanLimit}
       )
       SELECT DISTINCT LEAST(r.id, n.id) AS a, GREATEST(r.id, n.id) AS b,
              ROUND((1 - (r.embedding <=> n.embedding))::numeric, 3) AS sim
@@ -178,7 +223,7 @@ router.get("/", async (req: Request, res: Response) => {
         WHERE id <> r.id AND agent_id = ${agentId} AND status = 'active' AND embedding IS NOT NULL
         ORDER BY embedding <=> r.embedding LIMIT 1
       ) n
-      WHERE 1 - (r.embedding <=> n.embedding) >= 0.88
+      WHERE 1 - (r.embedding <=> n.embedding) >= ${T.dupThreshold}
       ORDER BY 3 DESC
     `);
     const dupPairs = (dupRes.rows as any[]).map((p) => ({ a: Number(p.a), b: Number(p.b), sim: Number(p.sim) }));
@@ -200,19 +245,19 @@ router.get("/", async (req: Request, res: Response) => {
     else if (health === "critical") push("health", "critical", "Self-check is CRITICAL", `Latest diagnostic (${lastDiag.at}) reports critical health.`);
     else if (health === "degraded") push("health", "warn", "Self-check is degraded", `Latest diagnostic (${lastDiag.at}) reports degraded health.`);
     else okChecks.push(`self-check healthy (${lastDiag.at})`);
-    if (badStreak >= 3) push("health-streak", "warn", "Degraded/critical streak", `${badStreak} of the last 5 self-checks were not healthy.`);
+    if (badStreak >= T.streakWarn) push("health-streak", "warn", "Degraded/critical streak", `${badStreak} of the last 5 self-checks were not healthy.`);
 
     if (drift >= 0.5) push("drift", "critical", `Drift score ${drift.toFixed(2)}`, "At or past the critical threshold (0.5). Check recent artifacts for em-dashes.");
     else if (drift > 0) push("drift", "warn", `Drift building (${drift.toFixed(2)})`, "Non-zero drift. Each em-dash in the last 20 artifacts adds 0.1; critical at 0.5.");
     else okChecks.push("drift 0.00");
 
     const emdash = num(cur.emdash_recent) ?? 0;
-    if (emdash >= 6) push("emdash", "critical", `${emdash} em-dashes in recent artifacts`, "The NEXT self-check will score drift > 0.5 (critical). Run scripts/scrub-em-dashes.ts and find the writer (stale pre-scrub MCP process?).");
-    else if (emdash >= 5) push("emdash", "warn", `${emdash} em-dashes in recent artifacts`, "At the critical boundary: drift will read 0.5 on the next self-check (em-dashes are the dominant term; sycophancy flags add 0.02 each). Scrub now.");
+    if (emdash >= T.emdashCritical) push("emdash", "critical", `${emdash} em-dashes in recent artifacts`, "The NEXT self-check will score drift > 0.5 (critical). Run scripts/scrub-em-dashes.ts and find the writer (stale pre-scrub MCP process?).");
+    else if (emdash >= T.emdashBoundary) push("emdash", "warn", `${emdash} em-dashes in recent artifacts`, "At the critical boundary: drift will read 0.5 on the next self-check (em-dashes are the dominant term; sycophancy flags add 0.02 each). Scrub now.");
     else if (emdash > 0) push("emdash", "warn", `${emdash} em-dash(es) in recent artifacts`, "Drift will read >0 on the next self-check. A pre-sanitizer process is likely still writing; scrub and restart it.");
     else okChecks.push("0 em-dashes in last 20 artifacts (synthesis source text excluded, matching self-check)");
 
-    if (dupPairs.length > 0) push("dups", "warn", `${dupPairs.length} near-duplicate pair(s) forming`, `Active memories within 7 days at cosine >= 0.88: ${dupPairs.slice(0, 5).map((p) => `#${p.a}~#${p.b}@${p.sim}`).join(", ")}${dupPairs.length > 5 ? "..." : ""}. A dedup gate was bypassed (pre-restart Desktop? multi-chunk? force?). Reconsolidate or archive the newer copies.`);
+    if (dupPairs.length > 0) push("dups", "warn", `${dupPairs.length} near-duplicate pair(s) forming`, `Active memories within 7 days at cosine >= ${T.dupThreshold}: ${dupPairs.slice(0, 5).map((p) => `#${p.a}~#${p.b}@${p.sim}`).join(", ")}${dupPairs.length > 5 ? "..." : ""}. A dedup gate was bypassed (pre-restart Desktop? multi-chunk? force?). Reconsolidate or archive the newer copies.`);
     else okChecks.push("no near-duplicate pairs (7d window)");
 
     const expiredActive = num(cur.expired_active) ?? 0;
@@ -220,8 +265,8 @@ router.get("/", async (req: Request, res: Response) => {
     else okChecks.push("no crashed-reconsolidation residue");
 
     const dreamAge = num(cur.dream_hours_ago);
-    if (dreamAge === null || dreamAge > 72) push("dream", "critical", "Dream cycle stale", dreamAge === null ? "No dream cycle has ever run." : `Last dream ${Math.round(dreamAge)}h ago (nightly expected). Check the 'Cortex Dream Cycle' scheduled task.`);
-    else if (dreamAge > 30) push("dream", "warn", `Last dream ${Math.round(dreamAge)}h ago`, "Nightly cycle appears to have missed a run.");
+    if (dreamAge === null || dreamAge > T.dreamCriticalHours) push("dream", "critical", "Dream cycle stale", dreamAge === null ? "No dream cycle has ever run." : `Last dream ${Math.round(dreamAge)}h ago (nightly expected). Check the 'Cortex Dream Cycle' scheduled task.`);
+    else if (dreamAge > T.dreamWarnHours) push("dream", "warn", `Last dream ${Math.round(dreamAge)}h ago`, "Nightly cycle appears to have missed a run.");
     else okChecks.push(`dream cycle ${Math.round(dreamAge)}h ago`);
 
     const lastRealDream = dreams.find((d) => d.cycleType === "full" || d.cycleType === "resonance_only");
@@ -232,37 +277,37 @@ router.get("/", async (req: Request, res: Response) => {
 
     const reflectAge = num(cur.reflect_hours_ago);
     if (reflectAge === null) push("reflect", "warn", "Reflect has never produced a memory", "No reflection-sourced memories exist. Check the 'Cortex Nightly Reflect' scheduled task and reflect.log.");
-    else if (reflectAge > 96) push("reflect", "warn", `No reflections in ${Math.round(reflectAge / 24)}d`, "Nightly Reflect may be failing - check the scheduled task and reflect.log.");
-    else if (reflectAge > 48) push("reflect", "info", `Last reflection ${Math.round(reflectAge)}h ago`, "Reflect skips quiet days; only investigate if sessions were active.");
+    else if (reflectAge > T.reflectWarnHours) push("reflect", "warn", `No reflections in ${Math.round(reflectAge / 24)}d`, "Nightly Reflect may be failing - check the scheduled task and reflect.log.");
+    else if (reflectAge > T.reflectInfoHours) push("reflect", "info", `Last reflection ${Math.round(reflectAge)}h ago`, "Reflect skips quiet days; only investigate if sessions were active.");
     else okChecks.push(`reflect pipeline ${Math.round(reflectAge)}h ago`);
 
     const threadsAge = num(cur.threads_hours_ago);
     if (threadsAge === null) push("threads", "warn", "Background threads have never run", "Strategic/operational/relational cognition has no last_run. Check the 'Cortex Background Threads' scheduled task.");
-    else if (threadsAge > 72) push("threads", "warn", `Background threads ${Math.round(threadsAge / 24)}d stale`, "Strategic/operational/relational cognition is not running.");
+    else if (threadsAge > T.threadsWarnHours) push("threads", "warn", `Background threads ${Math.round(threadsAge / 24)}d stale`, "Strategic/operational/relational cognition is not running.");
     else okChecks.push(`background threads ${Math.round(threadsAge)}h ago`);
 
     const strength = num(cur.avg_synapse_strength);
     if (strength === null) push("synapses", "info", "No synapses yet", "The graph has no connections to measure - expected only for a brand-new agent.");
-    else if (strength < 0.15) push("synapses", "critical", `Synaptic collapse (avg ${strength})`, "Average connection strength below the 0.15 viability threshold.");
-    else if (strength < 0.25) push("synapses", "warn", `Synapse strength trending low (avg ${strength})`, "Approaching the 0.15 collapse threshold; dream strengthening may be under-firing.");
+    else if (strength < T.synapseCritical) push("synapses", "critical", `Synaptic collapse (avg ${strength})`, `Average connection strength below the ${T.synapseCritical} viability threshold.`);
+    else if (strength < T.synapseWarn) push("synapses", "warn", `Synapse strength trending low (avg ${strength})`, `Approaching the ${T.synapseCritical} collapse threshold; dream strengthening may be under-firing.`);
     else okChecks.push(`avg synapse strength ${strength}`);
 
     const missingHc = num(cur.missing_hc) ?? 0;
-    if (missingHc > 50) push("coverage-hc", "warn", `${missingHc} memories missing hippocampal codes`, "Invisible to DG/CA3 sparse recall. Run npm run backfill:hippocampal.");
+    if (missingHc > T.hcWarn) push("coverage-hc", "warn", `${missingHc} memories missing hippocampal codes`, "Invisible to DG/CA3 sparse recall. Run npm run backfill:hippocampal.");
     else if (missingHc > 0) push("coverage-hc", "info", `${missingHc} memories missing hippocampal codes`, "Run npm run backfill:hippocampal to restore full sparse-recall coverage.");
     else okChecks.push("hippocampal coverage 100%");
 
     const missingVal = num(cur.missing_valence) ?? 0;
-    if (missingVal > 25) push("coverage-val", "info", `${missingVal} memories missing valence`, "Run npx tsx scripts/backfill-valence.ts (zero-cost lexicon).");
+    if (missingVal > T.valenceInfo) push("coverage-val", "info", `${missingVal} memories missing valence`, "Run npx tsx scripts/backfill-valence.ts (zero-cost lexicon).");
     else okChecks.push(missingVal === 0 ? "valence coverage 100%" : `valence coverage ok (${missingVal} missing)`);
 
     const orphans = num(cur.orphans) ?? 0;
-    if (orphans > 100) push("orphans", "warn", `${orphans} orphaned memories`, "Active, synapse-less, untouched in 30+ days.");
+    if (orphans > T.orphansWarn) push("orphans", "warn", `${orphans} orphaned memories`, "Active, synapse-less, untouched in 30+ days.");
     else okChecks.push(`orphans ${orphans}`);
 
     const ingests7 = num(cur.agent_ingests_7d) ?? 0;
     const recons7 = num(cur.recons_7d) ?? 0;
-    if (ingests7 >= 10 && recons7 * 6 < ingests7) push("loop-ratio", "info", `Loop imbalance ${ingests7}:${recons7} (7d)`, "Agent ingests far outpace reconsolidations - sessions may be duplicating instead of updating. Check session compliance verdicts.");
+    if (ingests7 >= T.ratioMinIngests && recons7 * T.ratioFactor < ingests7) push("loop-ratio", "info", `Loop imbalance ${ingests7}:${recons7} (7d)`, "Agent ingests far outpace reconsolidations - sessions may be duplicating instead of updating. Check session compliance verdicts.");
     else okChecks.push(`ingest:reconsolidation ${ingests7}:${recons7} (7d)`);
 
     const skillsTotal = num(cur.skills_total) ?? 0;
@@ -284,7 +329,7 @@ router.get("/", async (req: Request, res: Response) => {
       priorTotals.sort((a, b) => a - b);
       const median = priorTotals[Math.floor(priorTotals.length / 2)] || 0;
       const todayTotal = totalsByDay.get(todayKey) || 0;
-      if (todayTotal > Math.max(10, median * 3)) {
+      if (todayTotal > Math.max(T.spikeMin, median * T.spikeFactor)) {
         push("write-spike", "info", `Ingestion spike today (${todayTotal} writes vs ~${median}/day median)`, "Sudden write bursts can indicate a runaway pipeline (e.g. reflect re-harvesting transcripts).");
       } else okChecks.push(`write volume normal (${todayTotal} today, ~${median}/day median)`);
     }
@@ -294,6 +339,8 @@ router.get("/", async (req: Request, res: Response) => {
 
     res.json({
       agent: agentExt,
+      generatedAt: new Date().toISOString(),
+      thresholds: T,
       series: { daily, diagnostics, dreams },
       current: {
         activeMemories: activeMem,
