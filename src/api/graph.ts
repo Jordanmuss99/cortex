@@ -54,6 +54,11 @@ function mapSourceType(sourceType: string): string {
     session: 'session',
     compound_feedback: 'compound_feedback',
     'compound-feedback': 'compound_feedback',
+    // Previously these collapsed into the catch-all 'session' bucket, which
+    // hid 200+ reflection memories from the dashboard source breakdown.
+    reflection: 'reflection',
+    'git-commit': 'git-commit',
+    'verified-api': 'verified-api',
   };
   return mapping[sourceType] || 'session';
 }
@@ -88,7 +93,8 @@ router.get("/", async (req: Request, res: Response) => {
     const nodesResult = await db.execute(sql`
       SELECT id, content, summary, source, source_type, entities, semantic_tags,
              priority, resonance_score, access_count, last_accessed_at, status,
-             created_at, novelty_score
+             created_at, novelty_score,
+             EXTRACT(EPOCH FROM (NOW() - last_recalled_at)) / 60.0 AS recalled_mins_ago
       FROM memory_nodes
       WHERE agent_id = ${agent.id} AND status = 'active'
       ORDER BY priority ASC, resonance_score DESC
@@ -211,6 +217,11 @@ router.get("/", async (req: Request, res: Response) => {
         createdAt: n.created_at,
         ageDays,
         noveltyScore: n.novelty_score,
+        // Minutes since last recall (null = never recalled). <60 means the
+        // memory is currently in its labile (reconsolidable) window.
+        recalledMinsAgo: n.recalled_mins_ago !== null && n.recalled_mins_ago !== undefined
+          ? Math.round(Number(n.recalled_mins_ago))
+          : null,
       };
     });
 
