@@ -49,12 +49,13 @@ const server = new McpServer(
     instructions: [
       "Cortex is the agent's persistent cross-session memory. Follow the Recall-and-Reconsolidate loop:",
       "1. Boot: call cortex_init at session start (skip if a Cortex context block was already auto-injected).",
-      "2. Recall before deciding: cortex_search / cortex_recall before architectural decisions, debugging, or repeating past work. Recalled memories become LABILE (updatable) for 1 hour.",
+      "2. Recall before deciding: cortex_search / cortex_recall before architectural decisions, debugging, or repeating past work - and at every new-task boundary. Recalled memories become LABILE (updatable) for 1 hour.",
       "3. Update over duplicate: if new information corrects or extends a recalled memory, call cortex_reconsolidate on that memory id. Do NOT ingest a near-duplicate; cortex_ingest REFUSES content too similar to an existing memory and tells you which memory to reconsolidate instead.",
-      "4. Ingest only genuinely novel facts, with canonical entity names (e.g. 'SimsOnline', 'Cortex', 'OpenCode') so synapses form correctly.",
-      "5. Skills: before a repeatable task, cortex_skill_retrieve; after applying one, cortex_skill_executed; improve with cortex_skill_refine instead of storing variants.",
+      "4. Capture at the moment of discovery: when a durable fact lands (bug root cause, API gotcha, milestone state), write it THEN - cortex_ingest for novel facts with canonical entity names (e.g. 'SimsOnline', 'Cortex', 'OpenCode'). Do not batch captures to session end; teardown writes get lost.",
+      "5. Skills: before a repeatable task, cortex_skill_retrieve; after applying one, cortex_skill_executed (proficiency only grows when executions are recorded); improve with cortex_skill_refine instead of storing variants. cortex_search also surfaces matching skills automatically.",
       "6. Record significant decisions with cortex_reason using an HONEST confidence (not 0.5 or 1.0); journal long sessions with cortex_journal.",
-      "7. State awareness: when the principal's recent messages show CLEAR state signals (frustration, fatigue, time pressure, rapid-fire terseness), call cortex_assess_state with those messages and adapt to the returned communication guidance. Skip it on sparse or neutral signal: few good assessments beat many noisy ones.",
+      "7. Lost? If you are unsure what to do next or about to ask the user 'what should I work on?', FIRST re-read cortex_init's Open Loops section or cortex_search for open work and recent journal entries - the answer is usually already in memory.",
+      "8. State awareness: when the principal's recent messages show CLEAR state signals (frustration, fatigue, time pressure, rapid-fire terseness), call cortex_assess_state with those messages and adapt to the returned communication guidance. Skip it on sparse or neutral signal: few good assessments beat many noisy ones.",
       "Style: never write em-dash characters into Cortex-bound content; use '--' instead (the drift self-check counts em-dashes).",
     ].join("\n"),
   }
@@ -84,7 +85,7 @@ async function resolveAgent(externalId: string): Promise<number> {
 // ─── Tool: cortex_search ────────────────────────────────
 server.tool(
   "cortex_search",
-  "Search CORTEX memory using hybrid scoring (semantic + text + recency + resonance + priority). Use this whenever you need to recall information from past conversations, files, transcripts, or any stored memory. Recalled results enter a 1-hour LABILE window: if you then learn something that updates one of them, use cortex_reconsolidate on that memory id instead of ingesting a duplicate.",
+  "Search CORTEX memory using hybrid scoring (semantic + text + recency + resonance + priority). Use this whenever you need to recall information from past conversations, files, transcripts, or any stored memory - and ALWAYS before asking the user what to do next (open work is usually already recorded). Recalled results enter a 1-hour LABILE window: if you then learn something that updates one of them, use cortex_reconsolidate on that memory id instead of ingesting a duplicate. Results also include matching procedural skills; if you apply one, record the outcome with cortex_skill_executed.",
   {
     query: z.string().describe("The search query"),
     agent_id: z
@@ -221,11 +222,39 @@ server.tool(
       })
       .join("\n\n---\n\n");
 
+    // Skill discovery rides every search (utilization research 2026-06-12:
+    // agents never call cortex_skill_retrieve unprompted - 15 skills, 1
+    // recorded execution - so matching skills must surface here, where the
+    // agent already is). Best-effort: a skills failure never breaks search.
+    let skillsBlock = "";
+    try {
+      // 0.40 floor calibrated 2026-06-12: direct task matches score 0.55+,
+      // related workflows 0.40-0.45, noise falls below 0.35.
+      const skillMatches = (await retrieveProcedural(agentId, query, 3)).filter(
+        (m) => m.matchType === "trigger" || m.relevanceScore >= 0.4
+      );
+      if (skillMatches.length > 0) {
+        const lines = skillMatches.map((m) => {
+          const sm = m.memory;
+          const runs =
+            sm.executionCount > 0
+              ? `${(sm.successRate * 100).toFixed(0)}% over ${sm.executionCount} runs`
+              : "never executed yet";
+          return `- Skill #${sm.id} "${sm.name}" (${sm.proceduralType}, ${sm.proficiency}, ${runs}) - trigger: ${sm.triggerContext.slice(0, 140)}`;
+        });
+        skillsBlock =
+          `\n\n---\n\n## Matching skills (procedural memory)\n${lines.join("\n")}\n` +
+          `If one applies: follow it, then call cortex_skill_executed(procedural_id, success) - proficiency only grows when executions are recorded. Full steps via cortex_skill_retrieve.`;
+      }
+    } catch (err) {
+      console.error("[cortex_search] skill match failed:", err);
+    }
+
     return {
       content: [
         {
           type: "text" as const,
-          text: `# CORTEX Search: "${query}"\nResults: ${results.rows.length}\n\n${formatted || "No results found."}`,
+          text: `# CORTEX Search: "${query}"\nResults: ${results.rows.length}\n\n${formatted || "No results found."}${skillsBlock}`,
         },
       ],
     };
@@ -351,7 +380,7 @@ server.tool(
 // ─── Tool: cortex_init ──────────────────────────────────
 server.tool(
   "cortex_init",
-  "Initialize a CORTEX session. Loads the top memories by hybrid score plus system stats. Use this at the start of every session as part of the boot sequence.",
+  "Initialize a CORTEX session. Loads the top memories by hybrid score, system stats, and OPEN LOOPS (latest journal threads/concerns plus the strategic background-thread next action). Use this at the start of every session as part of the boot sequence - and re-read the Open Loops section instead of asking the user what to work on next.",
   {
     agent_id: z
       .string()
@@ -399,6 +428,28 @@ server.tool(
       .where(eq(schema.cognitiveArtifacts.agentId, agentId))
       .orderBy(desc(schema.cognitiveArtifacts.createdAt))
       .limit(5);
+
+    // Open loops: latest journal entry (active threads, concerns) plus the
+    // strategic background-thread recommendation. Utilization research
+    // 2026-06-12: goal-less agents asked the user "what next?" while the
+    // answer sat unread in these two tables - surface them at boot.
+    const latestJournal = await db
+      .select()
+      .from(schema.agentStateLogs)
+      .where(eq(schema.agentStateLogs.agentId, agentId))
+      .orderBy(desc(schema.agentStateLogs.timestamp))
+      .limit(1);
+    const strategicThread = await db
+      .select()
+      .from(schema.backgroundThreads)
+      .where(
+        and(
+          eq(schema.backgroundThreads.agentId, agentId),
+          eq(schema.backgroundThreads.threadType, "strategic")
+        )
+      )
+      .orderBy(desc(schema.backgroundThreads.updatedAt))
+      .limit(1);
 
     // Active entities (most mentioned across active memories)
     const activeEntities = await db.execute(sql`
@@ -466,7 +517,35 @@ server.tool(
       }
     }
 
-    output += `---\n*CORTEX V2 ready. Use cortex_search for recall, cortex_recall for budget-aware context.*`;
+    const journalEntry = latestJournal[0];
+    const strategic = strategicThread[0];
+    if (journalEntry || strategic?.nextAction) {
+      output += `## Open Loops (start here when unsure what to work on)\n`;
+      if (journalEntry) {
+        const ts = journalEntry.timestamp.toISOString().replace("T", " ").slice(0, 16);
+        const threads = Array.isArray(journalEntry.activeThreads)
+          ? (journalEntry.activeThreads as unknown[]).map(String).filter(Boolean)
+          : [];
+        if (threads.length > 0) {
+          output += `- Active threads (journal ${ts}): ${threads.join("; ")}\n`;
+        }
+        if (journalEntry.concerns && journalEntry.concerns.length > 0) {
+          output += `- Open concerns: ${journalEntry.concerns.join("; ")}\n`;
+        }
+        if (journalEntry.notes) {
+          output += `- Last journal note: ${journalEntry.notes.slice(0, 300)}\n`;
+        }
+      }
+      if (strategic?.nextAction) {
+        const ranAt = strategic.lastRun
+          ? strategic.lastRun.toISOString().slice(0, 10)
+          : "unscheduled";
+        output += `- Strategic thread (${ranAt}) suggests: ${strategic.nextAction.slice(0, 300)}\n`;
+      }
+      output += `\n`;
+    }
+
+    output += `---\n*CORTEX V2 ready. Use cortex_search for recall, cortex_recall for budget-aware context. If you are unsure what to do next, work the Open Loops above or cortex_search for open work BEFORE asking the user.*`;
 
     return {
       content: [{ type: "text" as const, text: output }],
@@ -967,7 +1046,7 @@ server.tool(
 // ─── Tool: cortex_observe (Phase 4) ───────────────────
 server.tool(
   "cortex_observe",
-  "Capture and analyze the current screen state. Detects active app, window title, and visible content. Use for contextual awareness of what the principal is working on.",
+  "Capture the current screen: detects the foreground app/window and (on Windows) saves a full-screen PNG, returning its path for YOU to read with your image tools. Use when you need eyes on the live screen - debugging visual state, verifying what the principal is looking at, or capturing UI evidence. The observation is also stored as a low-priority memory unless store=false.",
   {
     agent_id: z.string().default("arlo").describe("Agent ID"),
     store: z.boolean().default(true).describe("Store observation in memory (false = describe only)"),
@@ -1099,7 +1178,7 @@ server.tool(
 // ─── Tool: cortex_monologue (Phase 6) ─────────────────
 server.tool(
   "cortex_monologue",
-  "Record an inner monologue entry. For observations, reflections, and self-directed thoughts.",
+  "Record an inner monologue entry - a self-directed thought that is not yet a conclusion. Concrete triggers: you abandoned an approach (record why), you noticed a pattern recurring across sessions, you formed a hypothesis worth testing later, or something felt off but you cannot prove it yet. Cheaper and looser than cortex_artifact; these entries feed future recall and the weekly audit.",
   {
     agent_id: z.string().default("arlo").describe("Agent ID"),
     content: z.string().describe("The thought or observation"),
@@ -1215,10 +1294,10 @@ server.tool(
       const steps = r.memory.steps.length > 0
         ? `\nSteps:\n${r.memory.steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}`
         : "";
-      return `## ${r.memory.name} (${r.memory.proceduralType}) [${r.memory.proficiency}]\nMatch: ${r.matchType} (${r.relevanceScore.toFixed(3)})\nTrigger: ${r.memory.triggerContext}\nSuccess rate: ${(r.memory.successRate * 100).toFixed(0)}% (${r.memory.executionCount} executions)${steps}\n\n${r.memory.description}`;
+      return `## Skill #${r.memory.id} "${r.memory.name}" (${r.memory.proceduralType}) [${r.memory.proficiency}]\nMatch: ${r.matchType} (${r.relevanceScore.toFixed(3)})\nTrigger: ${r.memory.triggerContext}\nSuccess rate: ${(r.memory.successRate * 100).toFixed(0)}% (${r.memory.executionCount} executions)${steps}\n\n${r.memory.description}`;
     }).join("\n\n---\n\n");
 
-    return { content: [{ type: "text" as const, text: `# Procedural Memories for: "${task_context}"\n\n${formatted}` }] };
+    return { content: [{ type: "text" as const, text: `# Procedural Memories for: "${task_context}"\n\n${formatted}\n\n---\nAfter applying a skill, record the outcome: cortex_skill_executed(procedural_id=<Skill #>, success=true|false).` }] };
   }
 );
 

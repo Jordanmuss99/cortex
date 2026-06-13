@@ -84,6 +84,9 @@ async function main() {
   if (verbs.skillStore > 0 && verbs.skillRetrieve === 0) {
     gaps.push(`SKILL VARIANT RISK: stored ${verbs.skillStore} skill(s) without checking cortex_skill_retrieve first - may duplicate an existing skill (use cortex_skill_refine).`);
   }
+  if (verbs.skillRetrieve > 0 && verbs.skillExecuted === 0) {
+    gaps.push(`SKILL-NOT-RECORDED: retrieved ${verbs.skillRetrieve} skill lookup(s) but recorded 0 executions - call cortex_skill_executed(procedural_id, success) after applying a skill; proficiency cannot grow otherwise.`);
+  }
 
   const outDir = join(homedir(), ".cortex");
   try {

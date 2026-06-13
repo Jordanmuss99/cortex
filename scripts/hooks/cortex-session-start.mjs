@@ -26,6 +26,7 @@ import { URL } from "node:url";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 
 const COMPLIANCE_FILE = join(homedir(), ".cortex", "claude-loop-compliance.json");
 const COMPLIANCE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -102,15 +103,58 @@ function httpRequest(method, urlStr, body, timeoutMs) {
 const getJson  = (url, t) => httpRequest("GET",  url, undefined, t);
 const postJson = (url, b, t) => httpRequest("POST", url, b,      t);
 
+// Claude Code passes hook JSON on stdin ({ source, cwd, session_id, ... }).
+// source is "startup" | "resume" | "clear" | "compact". Reading is
+// best-effort: manual runs with no stdin still work.
+async function readHookInput() {
+  try {
+    const raw = await Promise.race([
+      (async () => {
+        let buf = "";
+        for await (const chunk of process.stdin) buf += chunk;
+        return buf;
+      })(),
+      new Promise((resolve) => setTimeout(() => resolve(""), 400)),
+    ]);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function gitContext(cwd) {
+  const opts = { cwd, encoding: "utf8", timeout: 2000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] };
+  let branch = "";
+  let subject = "";
+  try { branch = execSync("git rev-parse --abbrev-ref HEAD", opts).trim(); } catch { /* not a repo */ }
+  try { subject = execSync("git log -1 --pretty=%s", opts).trim(); } catch { /* no history */ }
+  return { branch, subject };
+}
+
 async function main() {
-  const complianceLines = await loadComplianceLines();
+  const input = await readHookInput();
+  const source = String(input.source || "startup");
+  const isCompact = source === "compact";
+
+  // Post-compaction reload uses a work-scoped query (branch + last commit),
+  // mirroring the OpenCode rest-bridge compaction re-injection - the generic
+  // boot query is for cold starts. Compliance feed-forward stays a cold-boot
+  // concern; mid-session compaction skips it.
+  let query = QUERY;
+  if (isCompact && input.cwd) {
+    const { branch, subject } = gitContext(String(input.cwd));
+    const parts = [branch, subject, "recent decisions findings current task"].filter(Boolean);
+    if (parts.length > 1) query = parts.join(" ").slice(0, 400);
+  }
+
+  const complianceLines = isCompact ? [] : await loadComplianceLines();
   try {
     const h = await getJson(`${BASE}/api/v1/health`, HEALTH_TIMEOUT_MS);
     if (!h.ok) throw new Error(`health ${h.status}`);
 
     const [statusRes, searchRes] = await Promise.allSettled([
       getJson(`${BASE}/api/v1/status?agentId=${encodeURIComponent(AGENT)}`, QUERY_TIMEOUT_MS),
-      postJson(`${BASE}/api/v1/search`, { agentId: AGENT, query: QUERY, limit: LIMIT }, QUERY_TIMEOUT_MS),
+      postJson(`${BASE}/api/v1/search`, { agentId: AGENT, query, limit: LIMIT }, QUERY_TIMEOUT_MS),
     ]);
 
     const status = statusRes.status === "fulfilled" && statusRes.value.ok ? statusRes.value.json : null;
@@ -118,7 +162,11 @@ async function main() {
 
     const out = [];
     out.push(...complianceLines);
-    out.push("## Cortex session context (auto-loaded)");
+    out.push(
+      isCompact
+        ? "## Cortex session context (auto-reloaded after compaction)"
+        : "## Cortex session context (auto-loaded)"
+    );
     out.push("");
 
     if (status?.stats) {
@@ -135,7 +183,7 @@ async function main() {
     }
 
     if (search?.results?.length) {
-      out.push(`### Top ${search.results.length} memories for: "${QUERY}"`);
+      out.push(`### Top ${search.results.length} memories for: "${query}"`);
       out.push("");
       for (const m of search.results) {
         const src = (m.source ? String(m.source).split(/[/\\]/).pop() : null) || "unknown";
@@ -144,20 +192,21 @@ async function main() {
       }
       out.push("");
     } else {
-      out.push(`_(no memories matched boot query "${QUERY}" for agent ${AGENT})_`);
+      out.push(`_(no memories matched boot query "${query}" for agent ${AGENT})_`);
       out.push("");
     }
 
     out.push("---");
     out.push(
       "Cortex MCP is wired in - use the FULL loop, not just ingest: " +
-      "(1) `cortex_search`/`cortex_recall` BEFORE deciding or debugging; recalled memories are labile for 1h. " +
+      "(1) `cortex_search`/`cortex_recall` at every task boundary and BEFORE deciding or debugging; recalled memories are labile for 1h. " +
       "(2) If new info updates something recalled, `cortex_reconsolidate` it - ingest REFUSES near-duplicates. " +
-      "(3) `cortex_ingest` only for genuinely novel facts. " +
+      "(3) `cortex_ingest` only for genuinely novel facts, written AT THE MOMENT of discovery (never batched to session end). " +
       "(4) Before a repeatable task, `cortex_skill_retrieve`; after applying a skill, `cortex_skill_executed`; improve with `cortex_skill_refine`. " +
       "(5) Significant decisions: `cortex_reason` with honest confidence. " +
       "(6) End of long turns: `cortex_journal`. " +
-      "(7) CLEAR principal state signals (frustration, fatigue, time pressure): `cortex_assess_state` with their recent messages, adapt to the guidance; skip on sparse signal."
+      "(7) Unsure what to do next? Re-read cortex_init's Open Loops or `cortex_search` open work BEFORE asking the user. " +
+      "(8) CLEAR principal state signals (frustration, fatigue, time pressure): `cortex_assess_state` with their recent messages, adapt to the guidance; skip on sparse signal."
     );
 
     process.stdout.write(out.join("\n") + "\n");

@@ -1,12 +1,21 @@
 /**
  * CORTEX V2 — Perceptual Integration: Screen Observer
  *
- * Captures screenshots via Peekaboo, extracts context,
- * and stores observations in CORTEX memory.
+ * Captures the current screen state for contextual awareness and debugging.
+ *
+ * Windows (primary platform since 2026-06-12): native PowerShell capture of
+ * the foreground window title/process plus a full virtual-screen PNG saved
+ * under ~/.cortex/observations/. The PNG path is returned so the CALLING
+ * agent (which is multimodal) can read the image itself - Cortex does not
+ * run a server-side vision pass.
+ *
+ * macOS (legacy path): Peekaboo / AppleScript window metadata only.
  */
 import { db, schema } from "../db/index.js";
-import { eq, sql } from "drizzle-orm";
 import { execSync } from "child_process";
+import { existsSync, mkdirSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { extractEntitiesSync as extractEntities, extractSemanticTags } from "../ingestion/entities.js";
 import { formSynapses } from "../ingestion/synapse-formation.js";
 import { embedTexts } from "../ingestion/embeddings.js";
@@ -17,28 +26,113 @@ interface ScreenObservation {
   description: string;
   entities: string[];
   timestamp: string;
+  /** Absolute path of the saved screenshot PNG (Windows), or null. */
+  screenshotPath: string | null;
 }
 
 function runCommand(cmd: string): string {
   try {
-    return execSync(cmd, { encoding: "utf-8", timeout: 15000 }).trim();
+    return execSync(cmd, {
+      encoding: "utf-8",
+      timeout: 20000,
+      windowsHide: true,
+    }).trim();
   } catch {
     return "";
   }
 }
 
-export async function captureAndAnalyze(): Promise<ScreenObservation> {
-  // Get active window info via Peekaboo
-  const windowList = runCommand("peekaboo list 2>/dev/null");
-  const imageData = runCommand("peekaboo image --json 2>/dev/null");
+/** PowerShell-quoted single string literal ('' escapes '). */
+function psQuote(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
 
-  // Parse window info
+function captureWindows(): ScreenObservation {
+  const obsDir = join(homedir(), ".cortex", "observations");
+  try {
+    mkdirSync(obsDir, { recursive: true });
+  } catch {
+    /* best-effort; capture still reports window metadata */
+  }
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .replace("T", "_")
+    .slice(0, 19);
+  const outPath = join(obsDir, `observation-${stamp}.png`);
+
+  // One PowerShell pass: foreground window metadata via user32, then a
+  // full virtual-screen capture via System.Drawing. $pid is reserved in
+  // PowerShell - use $procId.
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "$ProgressPreference='SilentlyContinue'",
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
+    'Add-Type @"',
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "using System.Text;",
+    "public class CortexFG {",
+    '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+    '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);',
+    '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+    "}",
+    '"@',
+    "$h=[CortexFG]::GetForegroundWindow()",
+    "$sb=New-Object System.Text.StringBuilder 512",
+    "[void][CortexFG]::GetWindowText($h,$sb,512)",
+    "$procId=[uint32]0",
+    "[void][CortexFG]::GetWindowThreadProcessId($h,[ref]$procId)",
+    "$p=Get-Process -Id $procId -ErrorAction SilentlyContinue",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "$vs=[System.Windows.Forms.SystemInformation]::VirtualScreen",
+    "$bmp=New-Object System.Drawing.Bitmap $vs.Width,$vs.Height",
+    "$g=[System.Drawing.Graphics]::FromImage($bmp)",
+    "$g.CopyFromScreen($vs.Left,$vs.Top,0,0,$bmp.Size)",
+    `$bmp.Save(${psQuote(outPath)},[System.Drawing.Imaging.ImageFormat]::Png)`,
+    "$g.Dispose()",
+    "$bmp.Dispose()",
+    'Write-Output ("{0}|{1}" -f $p.ProcessName, $sb.ToString())',
+  ].join("\n");
+
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const out = runCommand(
+    `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+  );
+
+  let activeApp = "Unknown";
+  let windowTitle = "Unknown";
+  const lastLine = out.split("\n").map((l) => l.trim()).filter(Boolean).pop() || "";
+  const sep = lastLine.indexOf("|");
+  if (sep >= 0) {
+    activeApp = lastLine.slice(0, sep).trim() || "Unknown";
+    windowTitle = lastLine.slice(sep + 1).trim() || "Unknown";
+  }
+
+  // Only report the screenshot if the file actually landed.
+  const screenshotPath: string | null = existsSync(outPath) ? outPath : null;
+
+  const description = `Screen observation: ${activeApp} is active with window "${windowTitle}".${screenshotPath ? ` Full-screen capture saved to ${screenshotPath}.` : " Screen capture failed; window metadata only."}`;
+
+  return {
+    activeApp,
+    windowTitle,
+    description,
+    entities: extractEntities(`${activeApp} ${windowTitle} ${description}`),
+    timestamp: new Date().toISOString(),
+    screenshotPath,
+  };
+}
+
+function captureMacOS(): ScreenObservation {
+  const windowList = runCommand("peekaboo list 2>/dev/null");
+
   let activeApp = "Unknown";
   let windowTitle = "Unknown";
 
   if (windowList) {
-    const lines = windowList.split("\n").filter(l => l.trim());
-    // First line is usually the frontmost app
+    const lines = windowList.split("\n").filter((l) => l.trim());
     if (lines.length > 0) {
       const parts = lines[0].split(" - ");
       if (parts.length >= 2) {
@@ -50,26 +144,30 @@ export async function captureAndAnalyze(): Promise<ScreenObservation> {
     }
   }
 
-  // If Peekaboo not available, fall back to AppleScript
   if (activeApp === "Unknown") {
-    activeApp = runCommand(`osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null`) || "Unknown";
-    windowTitle = runCommand(`osascript -e 'tell application "System Events" to get name of first window of first application process whose frontmost is true' 2>/dev/null`) || "Unknown";
+    activeApp =
+      runCommand(
+        `osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null`
+      ) || "Unknown";
+    windowTitle =
+      runCommand(
+        `osascript -e 'tell application "System Events" to get name of first window of first application process whose frontmost is true' 2>/dev/null`
+      ) || "Unknown";
   }
 
-  // Build description
   const description = `Screen observation: ${activeApp} is active with window "${windowTitle}".`;
-
-  // Extract entities from the description and window context
-  const contextText = `${activeApp} ${windowTitle} ${description}`;
-  const entities = extractEntities(contextText);
-
   return {
     activeApp,
     windowTitle,
     description,
-    entities,
+    entities: extractEntities(`${activeApp} ${windowTitle} ${description}`),
     timestamp: new Date().toISOString(),
+    screenshotPath: null,
   };
+}
+
+export async function captureAndAnalyze(): Promise<ScreenObservation> {
+  return process.platform === "win32" ? captureWindows() : captureMacOS();
 }
 
 export async function ingestObservation(agentId: number, observation: ScreenObservation): Promise<number[]> {
@@ -84,7 +182,7 @@ export async function ingestObservation(agentId: number, observation: ScreenObse
     .values({
       agentId,
       content,
-      source: "screen-observer",
+      source: observation.screenshotPath || "screen-observer",
       sourceType: "observation",
       chunkIndex: 0,
       embedding: embeddings[0],
@@ -110,6 +208,10 @@ export function formatObservation(observation: ScreenObservation): string {
   output += `- Description: ${observation.description}\n`;
   if (observation.entities.length > 0) {
     output += `- Entities: ${observation.entities.join(", ")}\n`;
+  }
+  if (observation.screenshotPath) {
+    output += `- Screenshot: ${observation.screenshotPath}\n`;
+    output += `\nREAD the screenshot file above with your image/file reading tool to analyze the screen visually - Cortex stores the path, you supply the eyes.\n`;
   }
   return output;
 }
