@@ -18,6 +18,22 @@ router.get("/health", (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/v1/agents
+ * List all agents.
+ */
+router.get("/agents", async (_req: Request, res: Response) => {
+  try {
+    const agentsResult = await db.execute(sql`
+      SELECT id, external_id AS "externalId", name FROM agents ORDER BY id ASC
+    `);
+    res.json(agentsResult.rows);
+  } catch (err) {
+    console.error("[agents] Error:", err);
+    res.status(500).json({ error: "Failed to list agents" });
+  }
+});
+
+/**
  * GET /api/v1/status
  * Detailed system status with stats.
  */

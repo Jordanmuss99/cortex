@@ -73,5 +73,6 @@ async function start() {
 }
 
 start();
+console.error("[cortex] HOT RELOAD CHECK - index.ts loaded");
 
 export default app;
