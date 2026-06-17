@@ -1,0 +1,46 @@
+{
+  "benchmark": "LoCoMo",
+  "topK": 10,
+  "skipCat5": false,
+  "timestamp": "2026-06-17T07:17:46.500Z",
+  "system": "CORTEX V2.4",
+  "methodology": "Honest top_k=10 retrieval (not top_k=50 bypass). LLM-generated answers scored with token F1.",
+  "overall": {
+    "avgF1": 0.19892187734293001,
+    "avgEM": 0.03333333333333333,
+    "avgRetrieval": 1,
+    "total": 30
+  },
+  "byCategory": {
+    "1": {
+      "f1": 0.29115389970653127,
+      "em": 0.08333333333333333,
+      "retrieval": 1,
+      "count": 12
+    },
+    "2": {
+      "f1": 0.11479591836734694,
+      "em": 0,
+      "retrieval": 1,
+      "count": 14
+    },
+    "3": {
+      "f1": 0.06666666666666667,
+      "em": 0,
+      "retrieval": 1,
+      "count": 3
+    },
+    "4": {
+      "f1": 0.6666666666666666,
+      "em": 0,
+      "retrieval": 1,
+      "count": 1
+    },
+    "5": {
+      "f1": 0,
+      "em": 0,
+      "retrieval": 0,
+      "count": 0
+    }
+  }
+}

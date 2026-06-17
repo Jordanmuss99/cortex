@@ -133,8 +133,8 @@ async function main() {
   console.log(`Top-K: ${topK} | Skip Cat5: ${skipCat5} | Limit: ${limitArg || "all"}`);
   console.log();
 
-  // Load dataset
-  const dataFile = join(__dirname, "locomo10.json");
+  // Load dataset (LOCOMO_DATA env override keeps the large dataset off the repo drive, e.g. on E:)
+  const dataFile = process.env.LOCOMO_DATA || join(__dirname, "locomo10.json");
   console.log(`Loading dataset from ${dataFile}...`);
   const rawData = readFileSync(dataFile, "utf-8");
   const conversations: LoCoMoConversation[] = JSON.parse(rawData);
