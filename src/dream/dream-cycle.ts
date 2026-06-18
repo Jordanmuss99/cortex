@@ -363,18 +363,34 @@ async function phasePriorityReconciliation(agentId: number): Promise<number> {
   }
 
   // ── Step 3: Re-promote recently-accessed P2s ──
-  // If a P2 memory was accessed recently (last 7 days) and has high resonance,
-  // promote it back to P1. This makes demotion reversible: re-access re-promotes.
+  // VERY strict re-promotion to avoid fighting the cap guard. Only promote
+  // P2s that are in the top tier of access (access_count >= 10, accessed
+  // within 1 day) AND have very high resonance (2x the demotion threshold).
+  // The recall/search API bumps access_count on every search result, so
+  // access_count >= 5 is too low -- we need >= 10 to distinguish genuinely
+  // active memories from ones that just happened to be in search results.
+  //
+  // CRITICAL: Do NOT re-promote memories that were JUST demoted by the cap
+  // guard in step 2. We track the IDs of demoted memories and exclude them.
+  // Without this, the cap guard and re-promotion create a cycle where P1s
+  // get demoted then immediately re-promoted.
+  const promoteThreshold = resonanceThreshold * 2.0; // 2x demotion threshold
   const promote = await db.execute(sql`
     UPDATE memory_nodes mn
     SET priority = 1, updated_at = NOW()
     WHERE mn.agent_id = ${agentId}
       AND mn.status = 'active'
       AND mn.priority = 2
-      AND mn.resonance_score > ${resonanceThreshold}
+      AND mn.resonance_score > ${promoteThreshold}
       AND mn.last_accessed_at IS NOT NULL
-      AND mn.last_accessed_at > NOW() - INTERVAL '7 days'
-      AND mn.access_count >= 3
+      AND mn.last_accessed_at > NOW() - INTERVAL '1 day'
+      AND mn.access_count >= 10
+      AND mn.id NOT IN (
+        SELECT id FROM memory_nodes
+        WHERE agent_id = ${agentId}
+          AND priority = 2
+          AND updated_at > NOW() - INTERVAL '5 minutes'
+      )
   `);
   const promoted = Number((promote as { rowCount?: number }).rowCount || 0);
   console.error(`[dream] Phase 1b: Re-promoted ${promoted} P2->P1 (recently accessed, high resonance)`);
