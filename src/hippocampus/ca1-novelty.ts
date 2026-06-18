@@ -69,12 +69,12 @@ export async function computeNovelty(
     similarity: number;
   }>;
 
-  // No existing memories — everything is novel
+  // No existing memories -- everything is novel
   if (neighbors.length === 0) {
     return {
       noveltyScore: 0.8,
       resonanceScore: BASE_RESONANCE * 1.3,
-      adjustedPriority: Math.min(basePriority, 1),
+      adjustedPriority: basePriority, // don't promote priority from novelty
       predictedSimilarity: 0,
       sparseMismatch: 1.0,
     };
@@ -149,17 +149,22 @@ export async function computeNovelty(
   }
 
   // ── Modulate resonance and priority ──
+  // Novelty boosts RESONANCE (transient salience that decays over time), not
+  // PRIORITY (which is a permanent structural slot). The old code promoted
+  // novel content one priority tier (P2 -> P1) at ingest and nothing ever
+  // demoted it back, causing 52% of the corpus to accumulate at P0/P1.
+  // Now: novelty only affects resonance. The dream cycle's priority
+  // reconciliation step handles demotion based on sustained access signals.
   let resonanceScore = BASE_RESONANCE;
-  let adjustedPriority = basePriority;
+  const adjustedPriority = basePriority; // never promote priority from novelty
 
   if (noveltyScore > NOVEL_HIGH) {
-    // Highly novel: boost significantly
+    // Highly novel: boost resonance (not priority). This is transient --
+    // the dream cycle will decay it if the memory isn't accessed.
     resonanceScore = BASE_RESONANCE * 1.6;
-    adjustedPriority = Math.max(0, basePriority - 1); // elevate priority
   } else if (noveltyScore <= NOVEL_LOW) {
-    // Redundant/expected: reduce
+    // Redundant/expected: reduce resonance
     resonanceScore = BASE_RESONANCE * 0.6;
-    // Don't change priority for redundant content
   }
   // Normal range (0.3 - 0.7): use base resonance
 

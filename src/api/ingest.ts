@@ -23,10 +23,12 @@ router.post("/", async (req: Request, res: Response) => {
       content,
       source,
       sourceType = "api",
-      priority = 2,
+      priority: reqPriority = 2,
       entities: providedEntities,
       semanticTags: providedTags,
     } = req.body;
+
+    let priority = reqPriority;
 
     if (!agentId || !content) {
       res.status(400).json({ error: "agentId and content required" });
@@ -46,6 +48,14 @@ router.post("/", async (req: Request, res: Response) => {
 
     // Chunk content
     const chunks = chunkText(content);
+
+    // ── Priority floor for ephemeral content ──
+    // Observations and other ephemeral context should age out quickly.
+    // Force them to P3 minimum so the 7-day observation prune catches them
+    // and the dream cycle's resonance decay keeps them low.
+    if (sourceType === "observation" && priority < 3) {
+      priority = 3;
+    }
 
     // Embed all chunks
     const embeddings = await embedTexts(chunks.map((c) => c.text));

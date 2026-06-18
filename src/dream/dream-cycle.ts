@@ -7,6 +7,7 @@ import "dotenv/config";
 
 interface DreamStats {
   phase1_resonanceUpdated: number;
+  phase1b_prioritiesReconciled: number;
   phase2_memoriesDeleted: number;
   phase2_memoriesArchived: number;
   phase2_synapsesPruned: number;
@@ -58,6 +59,7 @@ export async function runDreamCycle(
 
   const stats: DreamStats = {
     phase1_resonanceUpdated: 0,
+    phase1b_prioritiesReconciled: 0,
     phase2_memoriesDeleted: 0,
     phase2_memoriesArchived: 0,
     phase2_synapsesPruned: 0,
@@ -78,12 +80,22 @@ export async function runDreamCycle(
   try {
     // ═══ SWS (Slow-Wave Sleep): Memory maintenance & consolidation ═══
     if (runSws || cycleType === "resonance_only" || cycleType === "pruning_only" || cycleType === "consolidation_only") {
-      if (runSws) console.error("[dream] ═══ SWS Phase (Slow-Wave Sleep) ═══");
+      if (runSws) console.error("[dream] === SWS Phase (Slow-Wave Sleep) ===");
 
       // ─── Phase 1: Resonance Analysis ──────────────────────
       if (runSws || cycleType === "resonance_only") {
         console.error("[dream] Phase 1 [SWS]: Resonance Analysis");
         stats.phase1_resonanceUpdated = await phaseResonanceAnalysis(agentId);
+      }
+
+      // ─── Phase 1b: Priority Reconciliation ─────────────────
+      // Recompute priority from sustained signals (access frequency,
+      // connectivity, recency) and enforce the P0/P1 cap. This must run
+      // AFTER resonance (Phase 1) so demotion uses fresh resonance scores,
+      // and BEFORE pruning (Phase 2) so pruning can reach demoted items.
+      if (runSws || cycleType === "resonance_only" || cycleType === "pruning_only") {
+        console.error("[dream] Phase 1b [SWS]: Priority Reconciliation");
+        stats.phase1b_prioritiesReconciled = await phasePriorityReconciliation(agentId);
       }
 
       // ─── Phase 2: Pruning ─────────────────────────────────
@@ -217,21 +229,177 @@ async function phaseResonanceAnalysis(agentId: number): Promise<number> {
 }
 
 /**
+ * Phase 1b: Priority Reconciliation
+ *
+ * Recomputes priority from SUSTAINED signals (access frequency, connectivity,
+ * recency) instead of one-time ingest novelty. This is the demotion path that
+ * was missing: CA1 used to promote novel content P2->P1 at ingest and nothing
+ * ever demoted it back. Now CA1 no longer promotes priority (only resonance),
+ * but the existing corpus still has inflated P0/P1 from the old code.
+ *
+ * Two-step process:
+ * 1. Demote: P1 memories with low resonance, old age, no access, and no
+ *    emotional salience get demoted to P2. P0 memories with the same profile
+ *    get demoted to P1 (not directly to P2 -- safer incremental step).
+ * 2. Cap guard: If P0+P1 still exceeds the target share (default 25%), demote
+ *    the least-resonant P1s to P2 until the cap is met.
+ *
+ * Protected: emotionally salient memories (decay_resistance > 0.5) and
+ * recently-accessed memories (last_accessed_at < 7 days) are never demoted.
+ */
+const P01_CAP_PCT = Number(process.env.CORTEX_P01_CAP_PCT || "25"); // target P0+P1 share
+const DEMOTION_MIN_AGE_DAYS = Number(process.env.CORTEX_DEMOTION_AGE_DAYS || "30");
+const DEMOTION_RESONANCE_PCT = Number(process.env.CORTEX_DEMOTION_RESONANCE_PCT || "25"); // below this percentile
+
+async function phasePriorityReconciliation(agentId: number): Promise<number> {
+  let totalDemoted = 0;
+
+  // ── Step 1: Demote low-signal P0/P1 to their next tier down ──
+  // Demotion criteria: old (>= DEMOTION_MIN_AGE_DAYS), low resonance
+  // (below P{DEMOTION_RESONANCE_PCT} of all active), never or rarely accessed
+  // (access_count <= 1), and not emotionally salient (decay_resistance <= 0.5).
+
+  // Compute the resonance percentile threshold for demotion
+  const pctResult = await db.execute(sql`
+    SELECT PERCENTILE_CONT(${DEMOTION_RESONANCE_PCT / 100}) WITHIN GROUP (ORDER BY resonance_score) AS p
+    FROM memory_nodes
+    WHERE agent_id = ${agentId} AND status = 'active'
+  `);
+  const resonanceThreshold = Number((pctResult.rows[0] as { p: number })?.p ?? 3.0);
+
+  console.error(
+    `[dream] Phase 1b: Demotion threshold -- resonance < ${resonanceThreshold.toFixed(2)} (P${DEMOTION_RESONANCE_PCT}), age > ${DEMOTION_MIN_AGE_DAYS}d, access <= 1`
+  );
+
+  // Demote P1 -> P2 (protect emotionally salient + recently accessed)
+  const demoteP1 = await db.execute(sql`
+    UPDATE memory_nodes mn
+    SET priority = 2, updated_at = NOW()
+    WHERE mn.agent_id = ${agentId}
+      AND mn.status = 'active'
+      AND mn.priority = 1
+      AND mn.resonance_score < ${resonanceThreshold}
+      AND mn.created_at < NOW() - make_interval(days => ${DEMOTION_MIN_AGE_DAYS})
+      AND mn.access_count <= 1
+      AND NOT EXISTS (
+        SELECT 1 FROM emotional_valence ev
+        WHERE ev.memory_id = mn.id AND ev.decay_resistance > 0.5
+      )
+  `);
+  const p1Demoted = Number((demoteP1 as { rowCount?: number }).rowCount || 0);
+  totalDemoted += p1Demoted;
+
+  // Demote P0 -> P1 (only if very old + very low resonance + never accessed)
+  // P0 is never demoted directly to P2 -- that would be too aggressive.
+  // P0 gets a separate, higher resonance threshold because Phase 1's formula
+  // gives P0 memories a high priority_weight (1.0), inflating their resonance.
+  // Use P50 (median) instead of P25 for P0 demotion to account for this.
+  const p0ResonanceThreshold = Math.max(resonanceThreshold * 1.5, 4.0);
+  const demoteP0 = await db.execute(sql`
+    UPDATE memory_nodes mn
+    SET priority = 1, updated_at = NOW()
+    WHERE mn.agent_id = ${agentId}
+      AND mn.status = 'active'
+      AND mn.priority = 0
+      AND mn.resonance_score < ${p0ResonanceThreshold}
+      AND mn.created_at < NOW() - make_interval(days => ${DEMOTION_MIN_AGE_DAYS * 2})
+      AND mn.access_count = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM emotional_valence ev
+        WHERE ev.memory_id = mn.id AND ev.decay_resistance > 0.5
+      )
+  `);
+  const p0Demoted = Number((demoteP0 as { rowCount?: number }).rowCount || 0);
+  totalDemoted += p0Demoted;
+
+  console.error(`[dream] Phase 1b: Demoted ${p1Demoted} P1->P2, ${p0Demoted} P0->P1`);
+
+  // ── Step 2: Cap guard -- enforce P0+P1 share target ──
+  // If P0+P1 still exceeds the target percentage, demote the least-resonant
+  // P1s to P2 until the cap is met. This is the "P1 cap guard" from the handoff.
+  const distResult = await db.execute(sql`
+    SELECT
+      COUNT(*) FILTER (WHERE priority IN (0, 1)) AS p01_count,
+      COUNT(*) AS total
+    FROM memory_nodes
+    WHERE agent_id = ${agentId} AND status = 'active'
+  `);
+  const dist = distResult.rows[0] as { p01_count: string; total: string };
+  const p01Count = Number(dist?.p01_count ?? 0);
+  const totalActive = Number(dist?.total ?? 1);
+  const p01Pct = (p01Count / totalActive) * 100;
+
+  console.error(
+    `[dream] Phase 1b: P0+P1 = ${p01Count}/${totalActive} (${p01Pct.toFixed(1)}%), target < ${P01_CAP_PCT}%`
+  );
+
+  if (p01Pct > P01_CAP_PCT) {
+    // Calculate how many P1s to demote
+    const targetP01Count = Math.ceil((P01_CAP_PCT / 100) * totalActive);
+    const excess = p01Count - targetP01Count;
+
+    if (excess > 0) {
+      // Demote the least-resonant P1s (not protected by emotional salience)
+      const capDemote = await db.execute(sql`
+        UPDATE memory_nodes mn
+        SET priority = 2, updated_at = NOW()
+        WHERE mn.id IN (
+          SELECT id FROM memory_nodes
+          WHERE agent_id = ${agentId}
+            AND status = 'active'
+            AND priority = 1
+            AND NOT EXISTS (
+              SELECT 1 FROM emotional_valence ev
+              WHERE ev.memory_id = memory_nodes.id AND ev.decay_resistance > 0.5
+            )
+          ORDER BY resonance_score ASC
+          LIMIT ${excess}
+        )
+      `);
+      const capDemoted = Number((capDemote as { rowCount?: number }).rowCount || 0);
+      totalDemoted += capDemoted;
+      console.error(`[dream] Phase 1b: Cap guard demoted ${capDemoted} P1->P2 (was ${p01Pct.toFixed(1)}%, target ${P01_CAP_PCT}%)`);
+    }
+  }
+
+  // ── Step 3: Re-promote recently-accessed P2s ──
+  // If a P2 memory was accessed recently (last 7 days) and has high resonance,
+  // promote it back to P1. This makes demotion reversible: re-access re-promotes.
+  const promote = await db.execute(sql`
+    UPDATE memory_nodes mn
+    SET priority = 1, updated_at = NOW()
+    WHERE mn.agent_id = ${agentId}
+      AND mn.status = 'active'
+      AND mn.priority = 2
+      AND mn.resonance_score > ${resonanceThreshold}
+      AND mn.last_accessed_at IS NOT NULL
+      AND mn.last_accessed_at > NOW() - INTERVAL '7 days'
+      AND mn.access_count >= 3
+  `);
+  const promoted = Number((promote as { rowCount?: number }).rowCount || 0);
+  console.error(`[dream] Phase 1b: Re-promoted ${promoted} P2->P1 (recently accessed, high resonance)`);
+
+  return totalDemoted;
+}
+
+/**
  * Phase 2: Pruning — Adaptive percentile-based strategy
  *
  * Instead of hardcoded thresholds, compute pruning boundaries from the agent's
  * actual resonance distribution. This prevents over-pruning in sparse corpora
  * and under-pruning in dense ones.
  *
- * Tier 1: resonance < P5 (bottom 5%) AND age > 30 days → DELETE
- * Tier 2: resonance < P15 (bottom 15%) AND age > 14 days → ARCHIVE
- * Tier 3: synapse strength < 0.1 → DELETE synapse
- * Tier 4: ephemeral observations > 7 days → DELETE
+ * Tier 1: resonance < P5 (bottom 5%) AND age > 30 days -> DELETE
+ * Tier 2: resonance < P15 (bottom 15%) AND age > 14 days -> ARCHIVE
+ * Tier 3: synapse strength < 0.1 -> DELETE synapse
+ * Tier 4: ephemeral observations > 7 days -> DELETE
  *
  * Floors: delete threshold never above 2.0, archive threshold never above 4.0
- * (prevents catastrophic pruning if distribution skews high)
  *
- * P0/P1 memories are NEVER pruned.
+ * P0 memories are NEVER pruned (structural protection).
+ * P1 memories are only pruned if very old (>60d), never accessed, and
+ *   not emotionally salient (guarded former-P1 path).
+ * P2+ memories are pruned on resonance/age as before.
  */
 async function phasePruning(agentId: number): Promise<{
   deleted: number;
@@ -240,6 +408,8 @@ async function phasePruning(agentId: number): Promise<{
   observationsPruned: number;
 }> {
   // Compute adaptive thresholds from resonance distribution
+  // Now includes ALL active memories (not just priority > 1) since priority
+  // reconciliation (Phase 1b) has already demoted stale P0/P1s to P2.
   const percentilesResult = await db.execute(sql`
     SELECT
       PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY resonance_score) AS p5,
@@ -248,7 +418,7 @@ async function phasePruning(agentId: number): Promise<{
     FROM memory_nodes
     WHERE agent_id = ${agentId}
       AND status = 'active'
-      AND priority > 1
+      AND priority > 0
   `);
 
   const pRow = percentilesResult.rows[0] as { p5: number; p15: number; total: string } | undefined;
@@ -260,15 +430,17 @@ async function phasePruning(agentId: number): Promise<{
     `[dream] Phase 2: Adaptive thresholds — delete < ${deleteThreshold.toFixed(2)} (P5), archive < ${archiveThreshold.toFixed(2)} (P15), corpus: ${pRow?.total ?? 0} eligible memories`
   );
 
-  // Tier 1: Delete bottom 5% resonance, old memories (exclude P0/P1 AND emotionally salient)
+  // Tier 1: Delete bottom 5% resonance, old memories (exclude P0 AND emotionally salient)
+  // P1 is now eligible for deletion if very old (>60d), never accessed
   const deleteResult = await db.execute(sql`
     UPDATE memory_nodes mn
     SET status = 'deleted', updated_at = NOW()
     WHERE mn.agent_id = ${agentId}
       AND mn.status = 'active'
-      AND mn.priority > 1
+      AND mn.priority > 0
       AND mn.resonance_score < ${deleteThreshold}
       AND mn.created_at < NOW() - INTERVAL '30 days'
+      AND (mn.priority > 1 OR (mn.priority = 1 AND mn.access_count = 0 AND mn.created_at < NOW() - INTERVAL '60 days'))
       AND NOT EXISTS (
         SELECT 1 FROM emotional_valence ev
         WHERE ev.memory_id = mn.id AND ev.decay_resistance > 0.5
@@ -276,15 +448,17 @@ async function phasePruning(agentId: number): Promise<{
   `);
   const deleted = Number((deleteResult as { rowCount?: number }).rowCount || 0);
 
-  // Tier 2: Archive bottom 15% resonance, moderately old memories (exclude P0/P1 AND emotionally salient)
+  // Tier 2: Archive bottom 15% resonance, moderately old memories (exclude P0 AND emotionally salient)
+  // P1 is eligible for archiving if old (>30d) and never accessed
   const archiveResult = await db.execute(sql`
     UPDATE memory_nodes mn
     SET status = 'archived', updated_at = NOW()
     WHERE mn.agent_id = ${agentId}
       AND mn.status = 'active'
-      AND mn.priority > 1
+      AND mn.priority > 0
       AND mn.resonance_score < ${archiveThreshold}
       AND mn.created_at < NOW() - INTERVAL '14 days'
+      AND (mn.priority > 1 OR (mn.priority = 1 AND mn.access_count = 0 AND mn.created_at < NOW() - INTERVAL '30 days'))
       AND NOT EXISTS (
         SELECT 1 FROM emotional_valence ev
         WHERE ev.memory_id = mn.id AND ev.decay_resistance > 0.4
