@@ -57,8 +57,19 @@ router.post("/", async (req: Request, res: Response) => {
     // cannot act on refusal guidance, so unlike the MCP gate this silently
     // returns the existing memory id as the canonical target. Body force:true
     // bypasses; multi-chunk (file/bulk) ingests are exempt.
+    //
+    // NOTE (2026-06-18): The original gate only ran for chunks.length === 1,
+    // which meant any content > 256 tokens (the chunk size) bypassed the gate
+    // entirely. This caused 12+ near-duplicate pairs from the Hermes gateway
+    // capture path (which sends full exchanges that are often multi-chunk).
+    // Fix: check the FIRST chunk's embedding against existing memories even
+    // for multi-chunk content. The first chunk is the most representative
+    // because it contains the beginning of the user turn.
     const DUP_THRESHOLD = Number(process.env.CORTEX_DUP_THRESHOLD || "0.88");
-    if (!req.body.force && chunks.length === 1) {
+    if (!req.body.force) {
+      // Check the first chunk's embedding for near-duplicates.
+      // For single-chunk content, this is the whole content.
+      // For multi-chunk content, the first chunk is a representative sample.
       const embLiteral = `[${embeddings[0].join(",")}]`;
       const dup = await db.execute(sql`
         SELECT id, 1 - (embedding <=> ${embLiteral}::vector) AS similarity
