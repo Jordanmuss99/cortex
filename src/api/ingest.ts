@@ -51,37 +51,32 @@ router.post("/", async (req: Request, res: Response) => {
     const embeddings = await embedTexts(chunks.map((c) => c.text));
 
     // ── Near-duplicate SKIP gate (machine path: skip, don't refuse) ──
-    // The nightly reflect pipeline re-mines resumed transcripts and re-POSTs
-    // the same insights (8 verbatim dup pairs landed 06-10/06-11 this way),
-    // and the bridge can re-mirror a breadcrumb across sessions. Automation
-    // cannot act on refusal guidance, so unlike the MCP gate this silently
-    // returns the existing memory id as the canonical target. Body force:true
-    // bypasses; multi-chunk (file/bulk) ingests are exempt.
-    //
-    // NOTE (2026-06-18): The original gate only ran for chunks.length === 1,
-    // which meant any content > 256 tokens (the chunk size) bypassed the gate
-    // entirely. This caused 12+ near-duplicate pairs from the Hermes gateway
-    // capture path (which sends full exchanges that are often multi-chunk).
-    // Fix: check the FIRST chunk's embedding against existing memories even
-    // for multi-chunk content. The first chunk is the most representative
-    // because it contains the beginning of the user turn.
+    // Checks ALL chunk embeddings against existing memories. If ANY chunk
+    // is a near-duplicate (cosine >= DUP_THRESHOLD), skip the entire ingest.
+    // This prevents the gateway capture path from creating near-duplicates
+    // when different captures of the same conversation overlap partially.
     const DUP_THRESHOLD = Number(process.env.CORTEX_DUP_THRESHOLD || "0.88");
     if (!req.body.force) {
-      // Check the first chunk's embedding for near-duplicates.
-      // For single-chunk content, this is the whole content.
-      // For multi-chunk content, the first chunk is a representative sample.
-      const embLiteral = `[${embeddings[0].join(",")}]`;
-      const dup = await db.execute(sql`
-        SELECT id, 1 - (embedding <=> ${embLiteral}::vector) AS similarity
-        FROM memory_nodes
-        WHERE agent_id = ${agent.id} AND status = 'active' AND embedding IS NOT NULL
-        ORDER BY embedding <=> ${embLiteral}::vector
-        LIMIT 1
-      `);
-      const top = dup.rows[0] as { id: number; similarity: number } | undefined;
-      if (top && Number(top.similarity) >= DUP_THRESHOLD) {
+      let foundDup: { id: number; similarity: number } | null = null;
+      // Check each chunk's embedding (limit to first 5 chunks for performance)
+      const chunksToCheck = Math.min(embeddings.length, 5);
+      for (let ci = 0; ci < chunksToCheck && !foundDup; ci++) {
+        const embLiteral = `[${embeddings[ci].join(",")}]`;
+        const dup = await db.execute(sql`
+          SELECT id, 1 - (embedding <=> ${embLiteral}::vector) AS similarity
+          FROM memory_nodes
+          WHERE agent_id = ${agent.id} AND status = 'active' AND embedding IS NOT NULL
+          ORDER BY embedding <=> ${embLiteral}::vector
+          LIMIT 1
+        `);
+        const top = dup.rows[0] as { id: number; similarity: number } | undefined;
+        if (top && Number(top.similarity) >= DUP_THRESHOLD) {
+          foundDup = { id: Number(top.id), similarity: Number(top.similarity) };
+        }
+      }
+      if (foundDup) {
         console.error(
-          `[ingest] skipped near-duplicate of #${top.id} (sim ${Number(top.similarity).toFixed(3)}) from ${sourceType}:${source || "?"}`
+          `[ingest] skipped near-duplicate of #${foundDup.id} (sim ${foundDup.similarity.toFixed(3)}) from ${sourceType}:${source || "?"}`
         );
         res.json({
           agentId,
@@ -89,8 +84,8 @@ router.post("/", async (req: Request, res: Response) => {
           nodeIds: [],
           synapsesFormed: 0,
           skipped: true,
-          duplicateOf: Number(top.id),
-          similarity: Number(top.similarity),
+          duplicateOf: foundDup.id,
+          similarity: foundDup.similarity,
         });
         return;
       }

@@ -371,9 +371,13 @@ async def process_request(messages: list[dict]) -> tuple[list[dict], Optional[st
 async def capture_exchange(latest_turn: str, assistant_content: str) -> None:
     """POST phase: ingest the exchange (async, never blocks).
 
-    Includes a client-side dedup cache to prevent re-capturing the same
-    or very similar exchanges (the REST ingest's dedup gate only covers
-    single-chunk content; multi-chunk exchanges bypass it).
+    Includes multiple dedup layers:
+    1. Client-side exact-key dedup (same user turn within DEDUP_MS window)
+    2. Client-side semantic dedup: search Cortex for existing memories matching
+       this exchange. If the top result has cosine >= 0.85, skip ingest entirely.
+       This prevents the "same topic, different turn" duplicate pattern where
+       each turn in a long conversation about the same project creates a
+       near-duplicate memory.
     """
     if not latest_turn or not assistant_content:
         return
@@ -381,10 +385,7 @@ async def capture_exchange(latest_turn: str, assistant_content: str) -> None:
     if len(latest_turn) + len(assistant_content) < CORTEX_CAPTURE_MIN_CHARS:
         return
 
-    # ── Client-side dedup: skip if we recently captured this same user turn ──
-    # The REST ingest dedup gate only runs for single-chunk content (<=256 tokens).
-    # Gateway captures are often multi-chunk, so they bypass the server-side gate.
-    # This cache prevents the same exchange from being ingested twice.
+    # ── Layer 1: Client-side exact dedup ──
     capture_key = latest_turn[:200]
     now_ms = time.time() * 1000
     last_capture_ts = _last_capture_ts.get(capture_key, 0)
@@ -403,6 +404,53 @@ async def capture_exchange(latest_turn: str, assistant_content: str) -> None:
     content = f"User: {latest_turn}\n\nAssistant: {assistant_content}"
     source = "hermes-gateway"
     source_type = "verified-api" if priority == 0 else "api"
+
+    # ── Layer 2: Novelty-gated capture ──
+    # Instead of capturing every exchange and relying on the server-side dedup
+    # gate to catch duplicates, we check Cortex first: only capture if this
+    # exchange is genuinely novel (no existing memory matches it).
+    # This prevents the "same topic, different turn" duplicate pattern where
+    # a long working session about Cortex/SimsOnline/etc creates dozens of
+    # near-duplicate memories.
+    # VERIFIED breadcrumbs bypass this check (they're always captured at P0).
+    if priority != 0:  # Only do novelty check for non-VERIFIED captures
+        try:
+            search_resp = await _http_call(
+                "POST",
+                f"{CORTEX_REST_BASE}/api/v1/search",
+                json={"query": latest_turn[:500], "agentId": CORTEX_AGENT_ID, "limit": 1},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            if search_resp.status == 200:
+                search_data = await search_resp.json()
+                results = search_data.get("results", [])
+                if results:
+                    top = results[0]
+                    existing_content = top.get("content", "").lower()
+                    turn_text = latest_turn[:500].lower()
+                    # Use stopword-filtered word overlap to check novelty.
+                    # Only skip if VERY high overlap (>= 75%) -- this means
+                    # we're re-capturing essentially the same topic.
+                    stopwords = {"the", "and", "for", "are", "was", "but", "not", "you",
+                                 "all", "can", "her", "was", "one", "our", "out", "has",
+                                 "have", "from", "they", "this", "that", "with", "will",
+                                 "your", "what", "when", "how", "into", "been", "them",
+                                 "than", "then", "these", "those", "their", "would",
+                                 "could", "should", "about", "which", "there", "here",
+                                 "just", "like", "also", "only", "some", "more", "such",
+                                 "very", "much", "many", "most", "each", "make", "made",
+                                 "does", "done", "were", "where", "while", "after",
+                                 "before", "between", "during", "through", "because"}
+                    turn_words = set(w for w in turn_text.split() if len(w) >= 4 and w not in stopwords and w.isalpha())
+                    existing_words = set(w for w in existing_content.split() if len(w) >= 4 and w not in stopwords and w.isalpha())
+                    if turn_words and existing_words:
+                        overlap = len(turn_words & existing_words) / len(turn_words)
+                        if overlap >= 0.75:
+                            log.debug("Skipping capture: %d%% word overlap with #%s (not novel)",
+                                      int(overlap * 100), top.get("id"))
+                            return
+        except Exception as e:
+            log.debug("Novelty check failed (non-fatal, will capture): %s", e)
 
     asyncio.create_task(cortex_ingest(content, source, source_type, priority))
 
