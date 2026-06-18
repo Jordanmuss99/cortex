@@ -50,6 +50,7 @@ The single highest-leverage move is not more features -- it is making the **one*
   3. *Unnormalized:* `ca3Boost = activationScore * 0.3` with activation empirically ~30, so it swamps a hybrid score that maxes ~1.5. When CA3 fires it dominates regardless of relevance.
   - *And* the graph CA3 traverses is **85% entity-co-occurrence** (13,355 `entity_shared` / 2,414 `temporal` / **159 `semantic`**). So even functioning CA3 is closer to an entity join than semantic pattern completion. It was also **not used to produce the benchmark numbers**.
   - *Root cause of the starved semantic graph:* `synapse-formation.ts` only forms a `semantic` edge at cosine **> 0.85** (near-duplicate level), so almost nothing associative is ever linked at ingest (hence 159 lifetime). Entity edges are sensibly **IDF-weighted** (`clamp(0.8 - 0.1*ln(1+df), 0.3, 0.8)`, so hub entities floor at 0.3), but they dominate by count. Lowering the semantic threshold (~0.75) would build a real associative graph for CA3 to use.
+  - **RESOLVED (Phase 1, 2026-06-18):** the three scorers were unified onto `hybridSearch` (MCP `cortex_search`/`cortex_recall` and the benchmark client now delegate to it), and CA3 was fixed -- normalized (`ca3Score / maxCa3`, weight 0.25) and able to inject, gated by `CORTEX_CA3`. The honest A/B (LoCoMo, n=231, top-10) then found **no recall improvement from CA3: 95.67% both on and off.** So the flagship feature, once properly wired and measured, **does not improve retrieval** -- it is gated **off** by default pending a measured gain. Retrieval is excellent (~95.7%) without it.
 - **Compounding intelligence: 44%** on CogBench (its own benchmark) -- the "gets smarter over time" capability is the weakest measured.
 - **Emotional recall: 58%** on CogBench (`emotionalRecallAdvantage` 0.5). The valence machinery barely moves recall -- and the code explains why: `valence/analyzer.ts` is a hardcoded English keyword lexicon with crude `String.includes` substring matching (`"won"` matches "wonder", `"fire"` matches "fired"), presence-counts, and arbitrary multipliers. It is an admitted "Phase 1" stub, yet it feeds a real `0.10 * recall_boost` term in ranking. Worse, `RELEVANCE_CORE` includes `"cortex"/"memory"/"agent"`, so this self-referential corpus is systematically relevance-boosted toward meta-content.
 - **Dream synthesis is template filler, write-only.** Phase 5 produces exactly 30/night (its `LIMIT`); every `implication` is `Memory from [A] connects to [B]` from entity-set intersection (150 actionable / 48 not). ~198 accumulated, and since both search paths query `memory_nodes` (not `cognitive_artifacts`), they are **never retrieved**. (Phase 4 candidate generation is fine; Phase 5 is the gap -- see `CORTEX_DREAM_REASONING_UPGRADE.md`.)
@@ -71,6 +72,33 @@ The single highest-leverage move is not more features -- it is making the **one*
 
 ---
 
+## Phase 1 Follow-up: Unified retrieval & honest CA3 A/B (2026-06-18)
+
+Phase 1 completed: MCP `cortex_search` / `cortex_recall` now call the same `hybridSearch` scorer as REST; CA3 injection and normalization defects are fixed; an honest A/B was run.
+
+### What changed
+
+- `src/api/search.ts`: exported `hybridSearch` with an options interface; fixed CA3 to (a) inject CA3-only candidates into the candidate set (not just re-rank the hybrid top-K) and (b) normalize activation scores to [0,1] before blending with weight 0.25. Added `CORTEX_CA3=off` env switch to cleanly disable CA3.
+- `src/mcp/server.ts`: `cortex_search` and `cortex_recall` now delegate to `hybridSearch`, preserving skill surfacing, verbose formatting, and token-budget trimming.
+- `benchmarks/lib/cortex-client.ts`: benchmark `search()` now uses `hybridSearch` so the benchmark scorer matches production.
+- `benchmarks/locomo/run-retrieval.ts`: supports `LOCOMO_DATA`, `--full-pipeline` (required for CA3 because fastMode skips hippocampal encoding), `--limit N`, and exits cleanly.
+- Added `src/__tests__/search.test.ts`: 5 tests covering CA3 disable, CA3-only injection, normalization preventing auto-rank #1, empty CA3 no-op, and hybrid/blended score exposure.
+
+### Honest CA3 A/B
+
+Method: LoCoMo retrieval-only benchmark, top-10, full hippocampal pipeline (synapses + sparse codes enabled), same two conversations in both runs, only `CORTEX_CA3` toggled.
+
+- CA3 **off**: 231 questions, R@10 = 95.67%, MRR = 66.0%
+- CA3 **on**: 231 questions, R@10 = 95.67%, MRR = 66.0%
+- Miss lists are identical.
+
+Conclusion: on this retrieval task, CA3 pattern completion does **not** improve recall. The no-CA3 hybrid already retrieves the correct session 95.7% of the time; CA3 neither added hits nor changed rankings meaningfully.
+
+### Implications
+
+- The "three different scorers" divergence is resolved: benchmark, REST, and MCP now use one scorer.
+- CA3 remains mathematically interesting but is not earning its runtime cost or complexity on real retrieval. Recommendation: keep the fixed implementation, but **gate CA3 off by default** (`CORTEX_CA3=off`) and only re-enable after a future change demonstrates measurable recall gain. Document this in the benchmark baseline.
+
 ## 5. Operational findings
 
 - **Meridian coupling (the real, narrow risk).** Cortex's `llm.ts` builds the Anthropic client with no `baseURL`, inheriting `ANTHROPIC_BASE_URL=http://127.0.0.1:3456`. So per-ingest entity-extraction (`CORTEX_LLM_ENTITIES=true`) and dream summaries depend on Meridian being up + Max-OAuth-authed + pinned. If it is down/repinned, they fail or silently run on an unexpected model. Going local (below) removes this.
@@ -90,7 +118,7 @@ The single highest-leverage move is not more features -- it is making the **one*
 
 ## 7. Ranked recommendations
 
-1. **Port a *fixed* CA3 into the MCP path AND benchmark it honestly.** Make `cortex_search`/`cortex_recall` use `hybridSearch`; fix CA3 to (a) inject candidates (not just re-rank) and (b) normalize activation before the 0.3 blend. Then A/B against the no-CA3 hybrid -- if CA3 can't beat it, that is the finding.
+1. **~~Port a fixed CA3 into the MCP path and benchmark it honestly.~~ DONE (Phase 1, 2026-06-18).** MCP and REST now share `hybridSearch`; CA3 injection + normalization are fixed. The honest A/B on LoCoMo (n=231, full pipeline) found no recall improvement from CA3 (95.67% both on/off). Next: gate CA3 off by default and revisit only when a future change shows measurable gain.
 2. **Fix priority inflation:** add a demotion path + ship the P1 cap guard; reconsider CA1's one-tier promotion. Restore P3/P4 usage so priority discriminates again.
 3. **Phase-5 dream reasoning upgrade** (see `CORTEX_DREAM_REASONING_UPGRADE.md`): replace the entity-intersection template with an LLM reasoning pass over Phase-4 candidates; make syntheses retrievable.
 4. **Stand up the local LLM** (removes Meridian coupling + ingest timeouts for NER).

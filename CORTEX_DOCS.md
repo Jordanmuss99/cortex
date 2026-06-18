@@ -47,11 +47,14 @@ Cortex is a **biologically-inspired persistent memory system for AI agents**, wr
 ### Ingestion pipeline (`api/ingest.ts`, mirrored in MCP)
 chunk (256 tok / 25 overlap) -> Voyage embed -> `hippocampalEncode` = **DG** sparse-separate + **CA1** `computeNovelty` (sets priority/resonance; NOTE the older `computeSurpriseGating` is dead code) -> entity + semantic-tag extraction (regex + optional LLM NER) -> store node + hippocampal code -> `formSynapses` (semantic >0.85 cosine; entity_shared IDF-weighted; temporal same-source) -> valence analysis.
 
-### Retrieval -- THREE non-identical scorers (findings doc S1)
-- **REST `/api/v1/search` + `/recall`** -> `hybridSearch`: 6-factor hybrid **+ CA3 blend** (`+0.3 x activation`, re-sorted). CA3 here is prefilter-gated (re-rank only) and unnormalized.
-- **MCP `cortex_search` / `cortex_recall`** -> hand-rolled inline SQL, hybrid + emotional boost, **no CA3**. This is the path agents actually use.
-- **Benchmark harness** -> its own 5-factor hybrid, **no CA3**.
-These do not match; the published numbers reflect the benchmark scorer, not the agent's MCP path.
+### Retrieval -- unified scorer (Phase 1, 2026-06-18)
+All three paths now use the same `hybridSearch` implementation in `src/api/search.ts`:
+
+- **REST `/api/v1/search` + `/recall`** -> `hybridSearch`: 6-factor hybrid + normalized CA3 blend (weight 0.25).
+- **MCP `cortex_search` / `cortex_recall`** -> delegates to `hybridSearch`, then applies MCP-specific presentation (skill surfacing, verbose details, token budget).
+- **Benchmark harness** -> `cortex-client.ts search()` now delegates to `hybridSearch`.
+
+CA3 is gated by `CORTEX_CA3=off`. The Phase-1 honest A/B on LoCoMo (n=231, full hippocampal pipeline, top-10) found no recall improvement from CA3 (95.67% both on and off); it remains off by default pending a future measured gain.
 
 ### Dream cycle (`dream/dream-cycle.ts`, nightly 03:00)
 Phase 1 resonance (Ebbinghaus stability-adjusted; dominated by access+connectivity+priority, not time) -> Phase 2 pruning (adaptive P5/P15 percentiles, **only `priority > 1`** -> P0/P1 are unprunable) -> Phase 3 cluster summary (LLM, 150 tok, extractive fallback) -> Phase 4 free association (dense 0.6-0.85 + sparse-overlap candidate synapses) -> Phase 5 "synthesis" (currently entity-intersection template, not reasoning -- see upgrade doc).

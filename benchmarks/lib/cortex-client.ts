@@ -6,7 +6,8 @@
  */
 import { db, schema, initDatabase } from "../../src/db/index.js";
 import { sql, eq } from "drizzle-orm";
-import { embedTexts, embedQuery } from "../../src/ingestion/embeddings.js";
+import { embedTexts } from "../../src/ingestion/embeddings.js";
+import { hybridSearch } from "../../src/api/search.js";
 import { chunkText } from "../../src/ingestion/chunker.js";
 import { extractEntitiesSync, extractSemanticTags } from "../../src/ingestion/entities.js";
 import { hippocampalEncode } from "../../src/hippocampus/index.js";
@@ -114,7 +115,19 @@ export async function ingestSession(
   if (!fastMode) {
     for (let i = 0; i < insertedIds.length; i++) {
       try {
-        await hippocampalEncode(agentId, embeddings[i], 2);
+        const { sparseCode, noveltyResult } = await hippocampalEncode(agentId, embeddings[i], 2);
+        // Persist the DG sparse code so CA3 pattern completion has substrate to seed
+        // from. Previously the encode result was discarded -> hippocampal_codes stayed
+        // empty -> patternComplete returned nothing -> CA3 was a no-op in benchmarks
+        // (the cause of the identical CA3-on/off A/B). Mirrors src/api/ingest.ts.
+        await db.insert(schema.hippocampalCodes).values({
+          memoryId: insertedIds[i],
+          agentId,
+          sparseIndices: sparseCode.indices,
+          sparseValues: sparseCode.values,
+          sparseDim: sparseCode.dim,
+          noveltyScore: noveltyResult.noveltyScore,
+        });
       } catch {
         // Skip encoding errors
       }
@@ -144,56 +157,12 @@ export async function search(
   query: string,
   topK: number = 5
 ): Promise<SearchResult[]> {
-  const queryEmbedding = await embedQuery(query);
-  const embeddingStr = `[${queryEmbedding.join(",")}]`;
-
-  const results = await db.execute(sql`
-    WITH vector_scores AS (
-      SELECT
-        id,
-        content,
-        source,
-        1 - (embedding <=> ${embeddingStr}::vector) AS cosine_sim,
-        CASE
-          WHEN content ILIKE ${"%" + query + "%"} THEN 1.0
-          ELSE 0.0
-        END AS text_match,
-        EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) AS recency,
-        LEAST(resonance_score / 10.0, 1.0) AS norm_resonance,
-        CASE priority
-          WHEN 0 THEN 1.0
-          WHEN 1 THEN 0.8
-          WHEN 2 THEN 0.5
-          WHEN 3 THEN 0.3
-          WHEN 4 THEN 0.1
-          ELSE 0.5
-        END AS priority_boost
-      FROM memory_nodes
-      WHERE agent_id = ${agentId}
-        AND status = 'active'
-        AND embedding IS NOT NULL
-    )
-    SELECT id, content, source,
-      (0.50 * cosine_sim
-     + 0.20 * text_match
-     + 0.15 * recency
-     + 0.10 * norm_resonance
-     + 0.05 * priority_boost) AS hybrid_score
-    FROM vector_scores
-    ORDER BY hybrid_score DESC
-    LIMIT ${topK}
-  `);
-
-  return (results.rows as Array<{
-    id: number;
-    content: string;
-    source: string | null;
-    hybrid_score: number;
-  }>).map((r) => ({
+  const results = await hybridSearch({ agentId, query, limit: topK });
+  return results.map((r) => ({
     id: r.id,
     content: r.content,
     source: r.source,
-    score: Number(r.hybrid_score),
+    score: r.score,
     sessionId: r.source?.split("/").pop(),
   }));
 }

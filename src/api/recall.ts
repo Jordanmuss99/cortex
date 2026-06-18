@@ -52,7 +52,7 @@ router.post("/", async (req: Request, res: Response) => {
     }
 
     // Fetch more results than we might need, then trim to budget
-    const searchResults = await hybridSearch(agent.id, query, 50);
+    const searchResults = await hybridSearch({ agentId: agent.id, query, limit: 50 });
 
     // Also fetch recent cognitive artifacts
     const recentArtifacts = await db

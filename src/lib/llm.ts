@@ -202,8 +202,11 @@ async function callOpenAICompatible(
     messages: openaiMessages,
   });
 
+  const message = response.choices[0]?.message as { content?: string; reasoning?: string } | undefined;
+  const content = message?.content || message?.reasoning || "";
+
   return {
-    content: response.choices[0]?.message?.content || "",
+    content,
     model: response.model,
     usage: response.usage
       ? {
@@ -268,7 +271,7 @@ async function callOllamaCloud(
   temperature: number,
   system?: string
 ): Promise<LLMResponse> {
-  const baseURL = process.env.OLLAMA_CLOUD_URL || "https://api.ollama.com/v1";
+  const baseURL = process.env.OLLAMA_CLOUD_URL || "https://ollama.com/v1";
   return callOpenAICompatible(config, baseURL, messages, maxTokens, temperature, system);
 }
 

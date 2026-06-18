@@ -5,9 +5,12 @@ import { patternComplete } from "../hippocampus/index.js";
 import { markLabile } from "../reconsolidation/index.js";
 import { eq, sql, and, ilike, or } from "drizzle-orm";
 
+const CA3_WEIGHT = 0.25;
+const CA3_ENABLED_DEFAULT = process.env.CORTEX_CA3 !== "off";
+
 const router = Router();
 
-interface SearchResult {
+export interface SearchResult {
   id: number;
   content: string;
   source: string | null;
@@ -16,7 +19,12 @@ interface SearchResult {
   resonanceScore: number | null;
   entities: string[] | null;
   semanticTags: string[] | null;
+  createdAt: string;
+  validFrom: string | null;
+  validUntil: string | null;
+  supersededBy: number | null;
   score: number;
+  hybridScore: number;
   scoreBreakdown: {
     cosine: number;
     textMatch: number;
@@ -30,22 +38,34 @@ interface SearchResult {
 
 /**
  * Hybrid search scoring:
- *   score = 0.5 * cosine_similarity
- *         + 0.2 * text_match
- *         + 0.15 * recency
- *         + 0.1 * resonance
- *         + 0.05 * priority_boost
+ *   score = 0.45 * cosine_similarity
+ *       + 0.18 * text_match
+ *       + 0.12 * recency
+ *       + 0.10 * resonance
+ *       + 0.05 * priority_boost
+ *       + 0.10 * emotional_boost
  */
-async function hybridSearch(
-  agentId: number,
-  query: string,
-  limit = 10
-): Promise<SearchResult[]> {
-  // Get query embedding
-  const queryEmbedding = await embedQuery(query);
+export interface HybridSearchOptions {
+  agentId: number;
+  query: string;
+  limit?: number;
+  candidateLimit?: number;
+  enableCA3?: boolean;
+  queryEmbedding?: number[];
+}
+
+export async function hybridSearch(options: HybridSearchOptions): Promise<SearchResult[]> {
+  const {
+    agentId,
+    query,
+    limit = 10,
+    candidateLimit = Math.max(limit * 4, 50),
+    enableCA3 = CA3_ENABLED_DEFAULT,
+    queryEmbedding: providedEmbedding,
+  } = options;
+  const queryEmbedding = providedEmbedding ?? (await embedQuery(query));
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
-  // Single query combining vector similarity + text matching + scoring
   const results = await db.execute(sql`
     WITH vector_scores AS (
       SELECT
@@ -58,16 +78,16 @@ async function hybridSearch(
         entities,
         semantic_tags,
         created_at,
+        valid_from,
+        valid_until,
+        superseded_by,
         1 - (embedding <=> ${embeddingStr}::vector) AS cosine_sim,
         CASE
           WHEN content ILIKE ${"%" + query + "%"} THEN 1.0
           ELSE 0.0
         END AS text_match,
-        -- Recency: exponential decay, 30-day half-life
         EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) AS recency,
-        -- Normalized resonance (0-1 scale, assuming max ~10)
         LEAST(resonance_score / 10.0, 1.0) AS norm_resonance,
-        -- Priority boost: P0=1.0, P1=0.8, P2=0.5, P3=0.3, P4=0.1
         CASE priority
           WHEN 0 THEN 1.0
           WHEN 1 THEN 0.8
@@ -94,42 +114,28 @@ async function hybridSearch(
     FROM vector_scores vs
     LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
     ORDER BY hybrid_score DESC
-    LIMIT ${limit}
+    LIMIT ${candidateLimit}
   `);
 
-  // ── CA3 Pattern Completion ──
-  // Run autoassociative recall in parallel with hybrid results
+  // CA3 Pattern Completion -- gated by enableCA3 so A/B comparisons are clean.
   let ca3Results: Map<number, number> = new Map();
-  try {
-    const completions = await patternComplete(agentId, queryEmbedding, limit);
-    for (const c of completions) {
-      ca3Results.set(c.memoryId, c.activationScore);
+  if (enableCA3) {
+    try {
+      const completions = await patternComplete(agentId, queryEmbedding, limit);
+      for (const c of completions) {
+        ca3Results.set(c.memoryId, c.activationScore);
+      }
+    } catch {
+      // CA3 is additive -- if it fails (e.g., no hippocampal codes yet), hybrid still works
     }
-  } catch {
-    // CA3 is additive — if it fails (e.g., no hippocampal codes yet), hybrid still works
   }
 
-  // NOTE (2026-04-10): Access-count telemetry and markLabile are now split
-  // into two concerns with different failure semantics:
-  //
-  //   1. Access-count UPDATE — telemetry, best-effort, wrapped in try/catch
-  //      so a failure is logged as non-fatal and the search response still
-  //      succeeds (the user still gets their results).
-  //
-  //   2. markLabile() — CORE LEARNING MECHANISM. Opens the reconsolidation
-  //      window so retrieved memories can be updated with new information.
-  //      NOT wrapped in try/catch: if this ever starts failing, we want it
-  //      LOUD, not silent. Silent markLabile failure is what caused the
-  //      7+ day procedural memory stall in April 2026. Never again.
-  //
-  // Both paths use sql.raw with an explicit ARRAY literal because drizzle-orm
-  // serializes JS number arrays as PostgreSQL composite ROW(...) types which
-  // Postgres refuses to cast to int[]. allAccessIds are typed as number[]
-  // from upstream SELECT rows, so no injection risk.
-  const resultIds = (results.rows as Array<{ id: number }>).map((r) => r.id);
-  const allAccessIds = [...new Set([...resultIds, ...ca3Results.keys()])];
+  // markLabile and access-count updates for all candidate IDs (hybrid + CA3).
+  // Failure here is loud because silent markLabile failure caused the 2026-04
+  // procedural-memory stall.
+  const allResultIds = (results.rows as Array<{ id: number }>).map((r) => r.id);
+  const allAccessIds = [...new Set([...allResultIds, ...ca3Results.keys()])];
   if (allAccessIds.length > 0) {
-    // Access-count telemetry (best-effort, non-fatal)
     try {
       const idsLiteral = `ARRAY[${allAccessIds.join(",")}]::int[]`;
       await db.execute(sql`
@@ -139,35 +145,99 @@ async function hybridSearch(
         WHERE id = ANY(${sql.raw(idsLiteral)})
       `);
     } catch (err) {
-      console.error("[search] access count update failed (non-fatal):", err);
+      console.error("[hybridSearch] access-count telemetry failed:", err);
     }
-
-    // Mark recalled memories as labile for reconsolidation (CRITICAL — not wrapped)
     await markLabile(allAccessIds);
   }
 
-  return (
-    results.rows as Array<{
-      id: number;
-      content: string;
-      source: string | null;
-      source_type: string | null;
-      priority: number | null;
-      resonance_score: number | null;
-      entities: string[] | null;
-      semantic_tags: string[] | null;
-      cosine_sim: number;
-      text_match: number;
-      recency: number;
-      norm_resonance: number;
-      priority_boost: number;
-      emotional_boost: number;
-      hybrid_score: number;
-    }>
-  ).map((row) => {
-    // Blend CA3 activation score with hybrid score if available
+  // Inject CA3-only candidates so pattern completion can surface memories
+  // the semantic prefilter missed.
+  const hybridIds = new Set(allResultIds);
+  const ca3OnlyIds = [...ca3Results.keys()].filter((id) => !hybridIds.has(id));
+  if (ca3OnlyIds.length > 0 && enableCA3) {
+    const idsLiteral = `ARRAY[${ca3OnlyIds.join(",")}]::int[]`;
+    const ca3OnlyResults = await db.execute(sql`
+      WITH vector_scores AS (
+        SELECT
+          id,
+          content,
+          source,
+          source_type,
+          priority,
+          resonance_score,
+          entities,
+          semantic_tags,
+          created_at,
+          valid_from,
+          valid_until,
+          superseded_by,
+          1 - (embedding <=> ${embeddingStr}::vector) AS cosine_sim,
+          CASE
+            WHEN content ILIKE ${"%" + query + "%"} THEN 1.0
+            ELSE 0.0
+          END AS text_match,
+          EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) AS recency,
+          LEAST(resonance_score / 10.0, 1.0) AS norm_resonance,
+          CASE priority
+            WHEN 0 THEN 1.0
+            WHEN 1 THEN 0.8
+            WHEN 2 THEN 0.5
+            WHEN 3 THEN 0.3
+            WHEN 4 THEN 0.1
+            ELSE 0.5
+          END AS priority_boost
+        FROM memory_nodes
+        WHERE agent_id = ${agentId}
+          AND status = 'active'
+          AND embedding IS NOT NULL
+          AND id = ANY(${sql.raw(idsLiteral)})
+          AND (valid_from IS NULL OR valid_from <= NOW())
+          AND (valid_until IS NULL OR valid_until > NOW())
+      )
+      SELECT vs.*,
+        COALESCE(ev.recall_boost, 0) AS emotional_boost,
+        (0.45 * vs.cosine_sim
+       + 0.18 * vs.text_match
+       + 0.12 * vs.recency
+       + 0.10 * vs.norm_resonance
+       + 0.05 * vs.priority_boost
+       + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
+      FROM vector_scores vs
+      LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
+    `);
+    (results.rows as Array<unknown>).push(...ca3OnlyResults.rows);
+  }
+
+  // Normalize CA3 activation to [0,1] and blend with hybrid score.
+  let maxCa3 = 0;
+  for (const score of ca3Results.values()) {
+    if (score > maxCa3) maxCa3 = score;
+  }
+
+  const scored = (results.rows as Array<{
+    id: number;
+    content: string;
+    source: string | null;
+    source_type: string | null;
+    priority: number | null;
+    resonance_score: number | null;
+    entities: string[] | null;
+    semantic_tags: string[] | null;
+    created_at: string;
+    valid_from: string | null;
+    valid_until: string | null;
+    superseded_by: number | null;
+    cosine_sim: number;
+    text_match: number;
+    recency: number;
+    norm_resonance: number;
+    priority_boost: number;
+    emotional_boost: number;
+    hybrid_score: number;
+  }>).map((row) => {
     const ca3Score = ca3Results.get(row.id);
-    const ca3Boost = ca3Score ? ca3Score * 0.3 : 0;
+    const ca3Activation = ca3Score && maxCa3 > 0 ? ca3Score / maxCa3 : 0;
+    const ca3Boost = enableCA3 ? ca3Activation * CA3_WEIGHT : 0;
     const blendedScore = row.hybrid_score + ca3Boost;
 
     return {
@@ -179,7 +249,12 @@ async function hybridSearch(
       resonanceScore: row.resonance_score,
       entities: row.entities,
       semanticTags: row.semantic_tags,
+      createdAt: row.created_at,
+      validFrom: row.valid_from,
+      validUntil: row.valid_until,
+      supersededBy: row.superseded_by,
       score: blendedScore,
+      hybridScore: row.hybrid_score,
       scoreBreakdown: {
         cosine: row.cosine_sim,
         textMatch: row.text_match,
@@ -187,13 +262,14 @@ async function hybridSearch(
         resonance: row.norm_resonance,
         priorityBoost: row.priority_boost,
         emotionalBoost: row.emotional_boost,
-        ca3Activation: ca3Score || 0,
+        ca3Activation,
       },
     };
-  })
-  // Re-sort by blended score since CA3 may have changed rankings
-  .sort((a, b) => b.score - a.score)
-  .slice(0, limit);
+  });
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 }
 
 /**
@@ -220,7 +296,7 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    const results = await hybridSearch(agent.id, query, limit);
+    const results = await hybridSearch({ agentId: agent.id, query, limit });
 
     res.json({
       query,
@@ -234,4 +310,4 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
-export { router as searchRouter, hybridSearch };
+export { router as searchRouter };

@@ -71,25 +71,30 @@ function evidenceToSessionNums(evidence: string[]): number[] {
 const args = process.argv.slice(2);
 const topK = args.includes("--topk") ? parseInt(args[args.indexOf("--topk") + 1]) : 10;
 const skipCat5 = args.includes("--skip-cat5");
+const convLimit = args.includes("--limit") ? parseInt(args[args.indexOf("--limit") + 1]) : undefined;
+const fullPipeline = args.includes("--full-pipeline") || process.env.LOCOMO_FULL_PIPELINE === "true";
 
 async function main() {
+  console.log("[benchmark] main start");
   console.log("============================================");
   console.log("  CORTEX V2.4 -- LoCoMo Retrieval Benchmark");
   console.log("  Pure retrieval. No LLM. No tricks.");
   console.log("============================================");
-  console.log(`Top-K: ${topK} | Skip Cat5: ${skipCat5}`);
+  console.log(`Top-K: ${topK} | Skip Cat5: ${skipCat5} | Full pipeline: ${fullPipeline} | Limit: ${convLimit ?? "all"}`);
   console.log();
 
-  const dataFile = join(__dirname, "locomo10.json");
+  const dataFile = process.env.LOCOMO_DATA || join(__dirname, "locomo10.json");
+  console.log("[benchmark] loading data...");
   const conversations: LoCoMoConversation[] = JSON.parse(readFileSync(dataFile, "utf-8"));
   console.log(`Loaded ${conversations.length} conversations\n`);
 
+  console.log("[benchmark] init benchmark agent...");
   const agentId = await initBenchmark("locomo-retrieval");
   const allResults: QuestionResult[] = [];
   const catResults: Record<number, QuestionResult[]> = {};
   let totalQuestions = 0;
 
-  for (let ci = 0; ci < conversations.length; ci++) {
+  for (let ci = 0; ci < (convLimit ?? conversations.length); ci++) {
     const conv = conversations[ci];
     const sessions = extractSessions(conv.conversation);
     console.log(`\n--- Conv ${ci + 1}/${conversations.length}: ${conv.sample_id} (${sessions.length} sessions, ${conv.qa.length} questions) ---`);
@@ -102,7 +107,7 @@ async function main() {
         .map(t => `[${t.speaker}] ${t.text}`)
         .join("\n");
       // Use session number as the ID so we can match against evidence
-      await ingestSession(agentId, String(session.sessionNum), sessionText, "locomo");
+      await ingestSession(agentId, String(session.sessionNum), sessionText, "locomo", !fullPipeline);
     }
     console.log(`  Ingested ${sessions.length} sessions`);
 

@@ -13,7 +13,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { db, schema, initDatabase } from "../db/index.js";
 import { scrubEmDashes } from "../lib/scrub.js";
-import { embedQuery } from "../ingestion/embeddings.js";
+import { hybridSearch } from "../api/search.js";
 import { chunkText, countTokens } from "../ingestion/chunker.js";
 import { embedTexts } from "../ingestion/embeddings.js";
 import { extractEntities, extractSemanticTags } from "../ingestion/entities.js";
@@ -103,122 +103,28 @@ server.tool(
   },
   async ({ query, agent_id, limit, verbose }) => {
     const agentId = await resolveAgent(agent_id);
-    const queryEmbedding = await embedQuery(query);
-    const embeddingStr = `[${queryEmbedding.join(",")}]`;
+    const results = await hybridSearch({ agentId, query, limit });
 
-    const results = await db.execute(sql`
-      WITH vector_scores AS (
-        SELECT
-          id,
-          content,
-          source,
-          source_type,
-          priority,
-          resonance_score,
-          entities,
-          semantic_tags,
-          created_at,
-          valid_from,
-          valid_until,
-          superseded_by,
-          1 - (embedding <=> ${embeddingStr}::vector) AS cosine_sim,
-          CASE
-            WHEN content ILIKE ${"%" + query + "%"} THEN 1.0
-            ELSE 0.0
-          END AS text_match,
-          EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) AS recency,
-          LEAST(resonance_score / 10.0, 1.0) AS norm_resonance,
-          CASE priority
-            WHEN 0 THEN 1.0
-            WHEN 1 THEN 0.8
-            WHEN 2 THEN 0.5
-            WHEN 3 THEN 0.3
-            WHEN 4 THEN 0.1
-            ELSE 0.5
-          END AS priority_boost
-        FROM memory_nodes
-        WHERE agent_id = ${agentId}
-          AND status = 'active'
-          AND embedding IS NOT NULL
-          AND (valid_from IS NULL OR valid_from <= NOW())
-          AND (valid_until IS NULL OR valid_until > NOW())
-      )
-      SELECT vs.*,
-        COALESCE(ev.recall_boost, 0) AS emotional_boost,
-        (0.45 * vs.cosine_sim
-       + 0.18 * vs.text_match
-       + 0.12 * vs.recency
-       + 0.10 * vs.norm_resonance
-       + 0.05 * vs.priority_boost
-       + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
-      FROM vector_scores vs
-      LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
-      ORDER BY hybrid_score DESC
-      LIMIT ${limit}
-    `);
-
-    // Update access counts (telemetry) AND open the reconsolidation window.
-    // NOTE (2026-04-10): Uses sql.raw with an explicit ARRAY literal because
-    // drizzle-orm serializes JS number arrays as PostgreSQL composite ROW(...)
-    // types which Postgres refuses to cast to int[] ("cannot cast type record
-    // to integer[]"). The wrapping try/catch ensures that a telemetry failure
-    // never kills a successful search response. resultIds are typed as number[]
-    // from the caller's SELECT rows, so there is no injection risk.
-    const resultIds = (results.rows as Array<{ id: number }>).map((r) => r.id);
-    if (resultIds.length > 0) {
-      try {
-        const idsLiteral = `ARRAY[${resultIds.join(",")}]::int[]`;
-        await db.execute(sql`
-          UPDATE memory_nodes
-          SET access_count = access_count + 1,
-              last_accessed_at = NOW()
-          WHERE id = ANY(${sql.raw(idsLiteral)})
-        `);
-        // Bugfix #5: Actually trigger the neuroscience reconsolidation loop
-        await markLabile(resultIds);
-      } catch (err) {
-        console.error("[cortex_search] access count or markLabile failed:", err);
-      }
-    }
-
-    const formatted = (
-      results.rows as Array<{
-        id: number;
-        content: string;
-        source: string | null;
-        source_type: string | null;
-        priority: number;
-        resonance_score: number;
-        entities: string[] | null;
-        semantic_tags: string[] | null;
-        created_at: string;
-        valid_from: string | null;
-        valid_until: string | null;
-        superseded_by: number | null;
-        hybrid_score: number;
-        cosine_sim: number;
-        text_match: number;
-        recency: number;
-      }>
-    )
+    const formatted = results
       .map((r) => {
         const src = r.source?.split("/").pop() || "unknown";
         const entities =
           r.entities?.length ? `\nEntities: ${r.entities.join(", ")}` : "";
         const tags =
-          r.semantic_tags?.length
-            ? `\nTags: ${r.semantic_tags.join(", ")}`
+          r.semanticTags?.length
+            ? `\nTags: ${r.semanticTags.join(", ")}`
             : "";
 
         let verboseInfo = "";
         if (verbose) {
-          const validFrom = r.valid_from ? new Date(r.valid_from).toLocaleDateString() : "since creation";
-          const validUntil = r.valid_until ? new Date(r.valid_until).toLocaleDateString() : "current";
-          const superseded = r.superseded_by ? `→ #${r.superseded_by}` : "";
-          verboseInfo = `\nPriority: P${r.priority} | Resonance: ${Number(r.resonance_score).toFixed(1)} | Valid: ${validFrom} — ${validUntil} ${superseded}`;
+          const validity = [];
+          if (r.validFrom) validity.push(`valid from ${r.validFrom}`);
+          if (r.validUntil) validity.push(`valid until ${r.validUntil}`);
+          if (r.supersededBy) validity.push(`superseded by #${r.supersededBy}`);
+          verboseInfo = `\nPriority: P${r.priority ?? "?"} | Resonance: ${(r.resonanceScore ?? 0).toFixed(2)} | Score: ${r.score.toFixed(3)}${validity.length ? ` | ${validity.join(" | ")}` : ""}`;
         }
 
-        return `## Memory #${r.id} [${src}] (score: ${Number(r.hybrid_score).toFixed(4)})\nCosine: ${Number(r.cosine_sim).toFixed(3)} | Text: ${Number(r.text_match).toFixed(0)} | Recency: ${Number(r.recency).toFixed(3)}${verboseInfo}${entities}${tags}\n\n${r.content}`;
+        return `### Memory #${r.id} [${src}] (score: ${r.score.toFixed(3)})${verboseInfo}\n${r.content}`;
       })
       .join("\n\n---\n\n");
 
@@ -251,17 +157,16 @@ server.tool(
     }
 
     return {
-      content: [
-        {
-          type: "text" as const,
-          text: `# CORTEX Search: "${query}"\nResults: ${results.rows.length}\n\n${formatted || "No results found."}${skillsBlock}`,
-        },
-      ],
+      content: [{
+        type: "text" as const,
+        text: `# CORTEX Search: "${query}"\nResults: ${results.length}\n\n${formatted || "No results found."}${skillsBlock}`,
+      }],
     };
   }
 );
 
 // ─── Tool: cortex_recall ────────────────────────────────
+
 server.tool(
   "cortex_recall",
   "Token-budget-aware context retrieval. Fetches the most relevant memories that fit within a token budget. Use this when you need to load context for a topic without exceeding token limits.",
@@ -278,43 +183,9 @@ server.tool(
   },
   async ({ query, agent_id, token_budget }) => {
     const agentId = await resolveAgent(agent_id);
-    const queryEmbedding = await embedQuery(query);
-    const embeddingStr = `[${queryEmbedding.join(",")}]`;
+    const results = await hybridSearch({ agentId, query, limit: 50, candidateLimit: 50 });
 
-    // Fetch candidates
-    const results = await db.execute(sql`
-      WITH vector_scores AS (
-        SELECT
-          id, content, source,
-          1 - (embedding <=> ${embeddingStr}::vector) AS cosine_sim,
-          CASE WHEN content ILIKE ${"%" + query + "%"} THEN 1.0 ELSE 0.0 END AS text_match,
-          EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) AS recency,
-          LEAST(resonance_score / 10.0, 1.0) AS norm_resonance,
-          CASE priority WHEN 0 THEN 1.0 WHEN 1 THEN 0.8 WHEN 2 THEN 0.5 WHEN 3 THEN 0.3 ELSE 0.1 END AS priority_boost
-        FROM memory_nodes
-        WHERE agent_id = ${agentId} AND status = 'active' AND embedding IS NOT NULL
-          AND (valid_from IS NULL OR valid_from <= NOW())
-          AND (valid_until IS NULL OR valid_until > NOW())
-      )
-      SELECT vs.*,
-        (0.45 * vs.cosine_sim + 0.18 * vs.text_match + 0.12 * vs.recency + 0.10 * vs.norm_resonance + 0.05 * vs.priority_boost + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
-      FROM vector_scores vs
-      LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
-      ORDER BY hybrid_score DESC
-      LIMIT 50
-    `);
-
-    // Bugfix #5: Open the reconsolidation window for recalled memories
-    const resultIds = (results.rows as Array<{ id: number }>).map((r) => r.id);
-    if (resultIds.length > 0) {
-      try {
-        await markLabile(resultIds);
-      } catch (err) {
-        console.error("[cortex_recall] markLabile failed:", err);
-      }
-    }
-
-    // Also get recent cognitive artifacts
+    // Also fetch recent cognitive artifacts
     const artifacts = await db
       .select()
       .from(schema.cognitiveArtifacts)
@@ -330,19 +201,14 @@ server.tool(
     parts.push("## Relevant Memories\n");
     usedTokens += countTokens("## Relevant Memories\n");
 
-    for (const row of results.rows as Array<{
-      id: number;
-      content: string;
-      source: string | null;
-      hybrid_score: number;
-    }>) {
+    for (const row of results) {
       const src = row.source?.split("/").pop() || "unknown";
-      const block = `### Memory #${row.id} [${src}] (score: ${Number(row.hybrid_score).toFixed(3)})\n${row.content}\n`;
+      const block = `### Memory #${row.id} [${src}] (score: ${row.score.toFixed(3)})\n${row.content}\n`;
       const blockTokens = countTokens(block);
 
       if (usedTokens + blockTokens > memoryBudget) {
-        if (Number(row.hybrid_score) > 0.6 && usedTokens + 150 < memoryBudget) {
-          const truncated = `### Memory #${row.id} [${src}] (score: ${Number(row.hybrid_score).toFixed(3)})\n${row.content.slice(0, 400)}...\n`;
+        if (row.score > 0.6 && usedTokens + 150 < memoryBudget) {
+          const truncated = `### Memory #${row.id} [${src}] (score: ${row.score.toFixed(3)})\n${row.content.slice(0, 400)}...\n`;
           const truncTokens = countTokens(truncated);
           if (usedTokens + truncTokens <= memoryBudget) {
             parts.push(truncated);
@@ -378,6 +244,7 @@ server.tool(
 );
 
 // ─── Tool: cortex_init ──────────────────────────────────
+
 server.tool(
   "cortex_init",
   "Initialize a CORTEX session. Loads the top memories by hybrid score, system stats, and OPEN LOOPS (latest journal threads/concerns plus the strategic background-thread next action). Use this at the start of every session as part of the boot sequence - and re-read the Open Loops section instead of asking the user what to work on next.",
