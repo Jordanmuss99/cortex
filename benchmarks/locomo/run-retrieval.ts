@@ -72,7 +72,10 @@ const args = process.argv.slice(2);
 const topK = args.includes("--topk") ? parseInt(args[args.indexOf("--topk") + 1]) : 10;
 const skipCat5 = args.includes("--skip-cat5");
 const convLimit = args.includes("--limit") ? parseInt(args[args.indexOf("--limit") + 1]) : undefined;
+const qLimit = args.includes("--qlimit") ? parseInt(args[args.indexOf("--qlimit") + 1]) : undefined;
 const fullPipeline = args.includes("--full-pipeline") || process.env.LOCOMO_FULL_PIPELINE === "true";
+const ca3Mode = process.env.CORTEX_CA3 === "off" ? "off" : "on";
+const semanticThreshold = process.env.CORTEX_SEMANTIC_THRESHOLD ?? "0.85";
 
 async function main() {
   console.log("[benchmark] main start");
@@ -80,7 +83,7 @@ async function main() {
   console.log("  CORTEX V2.4 -- LoCoMo Retrieval Benchmark");
   console.log("  Pure retrieval. No LLM. No tricks.");
   console.log("============================================");
-  console.log(`Top-K: ${topK} | Skip Cat5: ${skipCat5} | Full pipeline: ${fullPipeline} | Limit: ${convLimit ?? "all"}`);
+  console.log(`Top-K: ${topK} | Skip Cat5: ${skipCat5} | Full pipeline: ${fullPipeline} | Conv limit: ${convLimit ?? "all"} | Q limit: ${qLimit ?? "all"} | CA3: ${ca3Mode} | Semantic threshold: ${semanticThreshold}`);
   console.log();
 
   const dataFile = process.env.LOCOMO_DATA || join(__dirname, "locomo10.json");
@@ -114,6 +117,7 @@ async function main() {
     // Score each question (retrieval only)
     let qaList = conv.qa;
     if (skipCat5) qaList = qaList.filter(q => q.category !== 5);
+    if (qLimit !== undefined) qaList = qaList.slice(0, qLimit);
 
     for (const qa of qaList) {
       totalQuestions++;
@@ -194,12 +198,16 @@ async function main() {
   console.log(`CORTEX V2.4 (no LLM): ${(overall.recallAt10 * 100).toFixed(1)}%`);
 
   // Save
-  const outputPath = join(__dirname, `results-retrieval-top${topK}.json`);
+  const outputPath = join(__dirname, `results-retrieval-top${topK}-ca3-${ca3Mode}-sem${semanticThreshold.replace(".", "")}.json`);
   writeFileSync(outputPath, JSON.stringify({
     benchmark: "LoCoMo (Retrieval Only)",
     system: "CORTEX V2.4",
     topK,
-    methodology: `Pure retrieval, no LLM. top_k=${topK} (honest, not bypassing retrieval). Same methodology as LongMemEval 500/500 run.`,
+    ca3: ca3Mode,
+    semanticThreshold: parseFloat(semanticThreshold),
+    convLimit: convLimit ?? conversations.length,
+    qLimit: qLimit ?? null,
+    methodology: `Pure retrieval, no LLM. top_k=${topK}. Full pipeline: ${fullPipeline}. CA3=${ca3Mode}.`,
     timestamp: new Date().toISOString(),
     overall,
     byCategory: Object.fromEntries(

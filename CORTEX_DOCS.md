@@ -54,7 +54,7 @@ All three paths now use the same `hybridSearch` implementation in `src/api/searc
 - **MCP `cortex_search` / `cortex_recall`** -> delegates to `hybridSearch`, then applies MCP-specific presentation (skill surfacing, verbose details, token budget).
 - **Benchmark harness** -> `cortex-client.ts search()` now delegates to `hybridSearch`.
 
-CA3 is gated by `CORTEX_CA3=off`. The Phase-1 honest A/B on LoCoMo (n=231, full hippocampal pipeline, top-10) found no recall improvement from CA3 (95.67% both on and off); it remains off by default pending a future measured gain.
+CA3 is gated by `CORTEX_CA3`, which **defaults to ON** (`process.env.CORTEX_CA3 !== "off"`). Phase 3 A/B (valid full-pipeline, n=231): CA3 **neutral** on R@1/MRR/R@10 (53.2% / 67.5% / 95.7% both on and off). CA3 reshuffles on `arlo` but does not improve LoCoMo ground-truth recall. See `CORTEX_VERIFICATION_FINDINGS.md` Phase 3.
 
 ### Dream cycle (`dream/dream-cycle.ts`, nightly 03:00)
 Phase 1 resonance (Ebbinghaus stability-adjusted; dominated by access+connectivity+priority, not time) -> Phase 2 pruning (adaptive P5/P15 percentiles, **only `priority > 1`** -> P0/P1 are unprunable) -> Phase 3 cluster summary (LLM, 150 tok, extractive fallback) -> Phase 4 free association (dense 0.6-0.85 + sparse-overlap candidate synapses) -> Phase 5 "synthesis" (currently entity-intersection template, not reasoning -- see upgrade doc).

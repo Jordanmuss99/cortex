@@ -150,17 +150,16 @@ export function dgEncode(denseEmbedding: number[]): SparseCode {
 }
 
 /**
- * Compute sparse overlap between two DG codes.
+ * Sparse dot-product similarity between two L2-normalized DG codes.
  *
- * This is the sparse equivalent of cosine similarity:
- * sum of min(a[i], b[i]) for shared active indices.
+ * For shared active indices: sum(a[i] * b[i]). Equivalent to cosine
+ * similarity on the full expanded vector (zeros elsewhere). Bounded [0, 1]
+ * when both codes are L2-normalized (ReLU + k-WTA + norm in dgEncode).
  *
- * Since both vectors are L2-normalized, this is bounded [0, 1].
- *
- * @returns Overlap score in [0, 1]
+ * Previously this used sum(min(a[i], b[i])), which is NOT bounded and
+ * produced overlap scores > 7, corrupting CA1 novelty and dream resonance.
  */
 export function sparseOverlap(a: SparseCode, b: SparseCode): number {
-  // Build a map for the smaller code
   const [smaller, larger] =
     a.indices.length <= b.indices.length ? [a, b] : [b, a];
 
@@ -169,15 +168,15 @@ export function sparseOverlap(a: SparseCode, b: SparseCode): number {
     map.set(smaller.indices[i], smaller.values[i]);
   }
 
-  let overlap = 0;
+  let dot = 0;
   for (let i = 0; i < larger.indices.length; i++) {
     const val = map.get(larger.indices[i]);
     if (val !== undefined) {
-      overlap += Math.min(val, larger.values[i]);
+      dot += val * larger.values[i];
     }
   }
 
-  return overlap;
+  return Math.min(Math.max(dot, 0), 1);
 }
 
 /**

@@ -17,7 +17,7 @@ import { sql } from "drizzle-orm";
  * CA3's computeBatchOverlap eliminated at recall time.
  */
 
-const SEMANTIC_THRESHOLD = 0.85;
+const SEMANTIC_THRESHOLD = parseFloat(process.env.CORTEX_SEMANTIC_THRESHOLD ?? "0.85");
 const SEMANTIC_LIMIT_PER_NODE = 10;
 const ENTITY_LIMIT_PER_NODE = 40;
 const TEMPORAL_LIMIT_PER_NODE = 5;

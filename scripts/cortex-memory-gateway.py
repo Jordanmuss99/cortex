@@ -654,13 +654,18 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
 
     # ── PRE: deterministic recall injection ──
     modified_messages, latest_turn = await process_request(messages)
+    for msg in modified_messages:
+        if msg.get("role") == "developer":
+            msg["role"] = "system"
     payload["messages"] = modified_messages
+    payload["model"] = "gemma4-26b:latest"
+    log.info(f"Sending CC payload: {json.dumps(payload)[:500]}...")
 
     # ── FORWARD to real upstream ──
     upstream_url = f"{CORTEX_UPSTREAM}/chat/completions"
     headers = dict(request.headers)
     # Strip hop-by-hop headers
-    for h in ("Host", "Transfer-Encoding", "Content-Length"):
+    for h in ("Host", "Transfer-Encoding", "Content-Length", "Content-Encoding"):
         headers.pop(h, None)
 
     client = await get_upstream_client()
@@ -673,6 +678,11 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
             content=json.dumps(payload),
             headers=headers,
         ) as upstream_resp:
+            if upstream_resp.status_code >= 400:
+                error_body = await upstream_resp.aread()
+                log.error(f"Upstream returned {upstream_resp.status_code}: {error_body}")
+                return web.Response(status=upstream_resp.status_code, body=error_body)
+
             response = web.StreamResponse(
                 status=upstream_resp.status_code,
                 headers={
@@ -749,21 +759,50 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
     # ── PRE: deterministic recall injection (Responses API) ──
     modified_payload, latest_turn = await process_request_responses(payload)
 
-    # ── FORWARD to real upstream ──
-    upstream_url = f"{CORTEX_UPSTREAM}/responses"
+    # ── FORWARD to real upstream (translated to chat/completions) ──
+    upstream_url = f"{CORTEX_UPSTREAM}/chat/completions"
     headers = dict(request.headers)
-    for h in ("Host", "Transfer-Encoding", "Content-Length"):
+    for h in ("Host", "Transfer-Encoding", "Content-Length", "Content-Encoding"):
         headers.pop(h, None)
+
+    chat_payload = {
+        "model": "gemma4-26b:latest",
+        "stream": stream,
+        "messages": []
+    }
+    # Pass along tools if they exist
+    if "tools" in modified_payload:
+        chat_payload["tools"] = modified_payload["tools"]
+    
+    input_list = modified_payload.get("input", [])
+    if isinstance(input_list, str):
+        chat_payload["messages"].append({"role": "user", "content": input_list})
+    elif isinstance(input_list, list):
+        for item in input_list:
+            if not isinstance(item, dict): continue
+            role = item.get("role", "user")
+            if role == "developer": role = "system"
+            content = item.get("content", "")
+            if isinstance(content, list):
+                parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
+                content = "\n".join(parts)
+            chat_payload["messages"].append({"role": role, "content": content})
+            
+    log.info(f"Translated payload keys: {list(chat_payload.keys())}, messages count: {len(chat_payload['messages'])}")
 
     client = await get_upstream_client()
 
     if stream:
-        # Streaming Responses API: forward as SSE, capture text deltas
         async with client.stream(
             "POST", upstream_url,
-            content=json.dumps(modified_payload),
+            content=json.dumps(chat_payload),
             headers=headers,
         ) as upstream_resp:
+            if upstream_resp.status_code >= 400:
+                error_body = await upstream_resp.aread()
+                log.error(f"Upstream returned {upstream_resp.status_code}: {error_body}")
+                return web.Response(status=upstream_resp.status_code, body=error_body)
+
             response = web.StreamResponse(
                 status=upstream_resp.status_code,
                 headers={
@@ -774,33 +813,29 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
             await response.prepare(request)
 
             accumulated_content = []
-            # Buffer for multi-line SSE data fields
-            sse_data_buf: list[str] = []
             async for chunk in upstream_resp.aiter_bytes():
-                await response.write(chunk)
-                # Parse SSE to capture text deltas
                 try:
                     text = chunk.decode("utf-8", errors="replace")
                     for line in text.split("\n"):
-                        if line.startswith("data: "):
-                            sse_data_buf.append(line[6:])
-                        elif line.strip() == "" and sse_data_buf:
-                            # End of one SSE event -- parse the data
-                            data_str = "\n".join(sse_data_buf)
-                            sse_data_buf.clear()
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            data_str = line[6:]
                             try:
                                 obj = json.loads(data_str)
-                                # Responses API text deltas come as
-                                # response.output_text.delta with {delta: "..."}
-                                event_type = obj.get("type", "")
-                                if event_type == "response.output_text.delta":
-                                    delta_text = obj.get("delta", "")
-                                    if isinstance(delta_text, str) and delta_text:
-                                        accumulated_content.append(delta_text)
+                                delta = obj.get("choices", [{}])[0].get("delta", {})
+                                c = delta.get("content", "")
+                                if c:
+                                    accumulated_content.append(c)
+                                    # Translate to Responses API chunk
+                                    resp_chunk = {"type": "response.output_text.delta", "delta": c}
+                                    await response.write(f"data: {json.dumps(resp_chunk)}\n\n".encode("utf-8"))
                             except json.JSONDecodeError:
                                 pass
                 except Exception:
                     pass
+            
+            # Send completion markers
+            await response.write(b"data: {\"type\": \"response.output_text.done\"}\n\n")
+            await response.write(b"data: {\"type\": \"response.done\"}\n\n")
 
             # ── POST: capture ──
             if latest_turn and accumulated_content:
@@ -808,27 +843,39 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
 
             return response
     else:
-        # Non-streaming Responses API
         upstream_resp = await client.post(
             upstream_url,
-            content=json.dumps(modified_payload),
+            content=json.dumps(chat_payload),
             headers=headers,
         )
+        if upstream_resp.status_code >= 400:
+            log.error(f"Upstream returned {upstream_resp.status_code}: {upstream_resp.content}")
+
+        resp_json = {}
+        try:
+            resp_json = upstream_resp.json()
+            assistant_content = _extract_assistant_content(resp_json)
+        except Exception:
+            assistant_content = ""
+
+        responses_payload = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": assistant_content}]
+                }
+            ]
+        }
 
         # ── POST: capture ──
-        if latest_turn:
+        if latest_turn and assistant_content:
             try:
-                resp_json = upstream_resp.json()
-                assistant_content = _extract_responses_content(resp_json)
                 await capture_exchange(latest_turn, assistant_content)
             except Exception as exc:
                 log.debug("Capture skipped (responses parse error): %s", exc)
 
-        return web.Response(
-            status=upstream_resp.status_code,
-            body=upstream_resp.content,
-            content_type=upstream_resp.headers.get("content-type", "application/json"),
-        )
+        return web.json_response(responses_payload, status=upstream_resp.status_code)
 
 
 async def proxy_generic(request: web.Request) -> web.StreamResponse:
@@ -840,7 +887,7 @@ async def proxy_generic(request: web.Request) -> web.StreamResponse:
     path = request.path_qs
     upstream_url = f"{CORTEX_UPSTREAM}{path.replace('/v1', '', 1)}"
     headers = dict(request.headers)
-    for h in ("Host", "Transfer-Encoding", "Content-Length"):
+    for h in ("Host", "Transfer-Encoding", "Content-Length", "Content-Encoding"):
         headers.pop(h, None)
 
     client = await get_upstream_client()

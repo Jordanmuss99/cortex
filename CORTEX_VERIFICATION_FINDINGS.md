@@ -11,9 +11,9 @@
 **The mechanical plumbing is genuinely good; the higher-order "cognitive" features that would make Cortex more than strong RAG are mostly weak or unrealized.**
 
 - *Works and verified:* DG sparse-coding, dedup gate, reconsolidation (gated + audited), temporal validity, scheduling, vitals, 59 passing tests, 100% hippocampal/valence coverage.
-- *Weak or unrealized:* CA3 pattern completion (~nil realized value), compounding-intelligence (44% on its own benchmark), emotional-recall (58%), dream synthesis (template co-occurrence, write-only), skill learning (dead), ~~priority (inflated, no demotion)~~ **FIXED 2026-06-18: priority now discriminates (47.6% -> 25.0% P0/P1)**, ~~forgetting (barely runs)~~ **FIXED: Phase 1b demotion + cap guard + pruning reach**.
+- *Weak or unrealized:* CA3 pattern completion (functional but **neutral on LoCoMo accuracy**, Phase 3), compounding-intelligence (44%), emotional-recall (58%), dream synthesis (write-only), skill learning (dead), ~~**CA1 `novelty_score` corrupt**~~ **FIXED 2026-06-20** (`sparseOverlap` dot-product + backfill + dream SQL clamp), ~~priority inflation~~ **FIXED Phase 2**, ~~forgetting~~ **FIXED Phase 2**.
 
-The single highest-leverage move is not more features -- it is making the **one** flagship feature (CA3) real where the agent uses it, and **benchmarking it honestly** against the no-CA3 hybrid that already scores 100% on the easy split.
+The single highest-leverage move is improving end-to-end answer quality (retrieval is strong; generative F1 ~0.2) and making write-only cognitive layers (dream synthesis, skills) actually retrievable or pruning them.
 
 ---
 
@@ -38,7 +38,7 @@ The single highest-leverage move is not more features -- it is making the **one*
 - **Dedup gate works** -- live-refused a near-duplicate at cosine 0.924 (threshold 0.88).
 - **Reconsolidation is properly gated** (`reconsolidation/index.ts`): requires the labile window, explicit call, preserves original as a cognitive artifact (verified by using it this session; originals #508/#509 preserved).
 - **Scheduling is healthy** (Windows Task Scheduler): 7 Cortex tasks, all `Last Result = 0` (Dream 3:00, Background Threads 3:50, Reflect 3:45, Backup 3:30, Snapshot 4-hourly, Weekly Audit). The dream cycle does real work (last cycle: 850 resonance updates, 30 syntheses).
-- **CA1 novelty (`computeNovelty`) is sophisticated and is the live path** -- all-time top-5 predictive-coding mismatch (dense+sparse), sparse-gating to suppress false novelty, contradiction boost. (Its priority side-effect feeds inflation; see below.)
+- **CA1 novelty (`computeNovelty`) is the live ingest path** -- all-time top-5 predictive-coding mismatch (dense+sparse), sparse-gating, contradiction boost. Phase 2 removed its priority side-effect (resonance only). **`sparseOverlap` bug fixed 2026-06-20** (see section 3).
 
 ---
 
@@ -49,8 +49,9 @@ The single highest-leverage move is not more features -- it is making the **one*
   2. *Prefilter-gated in REST:* `search.ts` applies CA3 only to memories already in the hybrid top-K (`.map(results.rows)`), so CA3 can re-rank but **never inject** a memory the semantic prefilter missed -- defeating the purpose of autoassociative recall.
   3. *Unnormalized:* `ca3Boost = activationScore * 0.3` with activation empirically ~30, so it swamps a hybrid score that maxes ~1.5. When CA3 fires it dominates regardless of relevance.
   - *And* the graph CA3 traverses is **85% entity-co-occurrence** (13,355 `entity_shared` / 2,414 `temporal` / **159 `semantic`**). So even functioning CA3 is closer to an entity join than semantic pattern completion. It was also **not used to produce the benchmark numbers**.
-  - *Root cause of the starved semantic graph:* `synapse-formation.ts` only forms a `semantic` edge at cosine **> 0.85** (near-duplicate level), so almost nothing associative is ever linked at ingest (hence 159 lifetime). Entity edges are sensibly **IDF-weighted** (`clamp(0.8 - 0.1*ln(1+df), 0.3, 0.8)`, so hub entities floor at 0.3), but they dominate by count. Lowering the semantic threshold (~0.75) would build a real associative graph for CA3 to use.
-  - **RESOLVED (Phase 1, 2026-06-18):** the three scorers were unified onto `hybridSearch` (MCP `cortex_search`/`cortex_recall` and the benchmark client now delegate to it), and CA3 was fixed -- normalized (`ca3Score / maxCa3`, weight 0.25) and able to inject, gated by `CORTEX_CA3`. The honest A/B (LoCoMo, n=231, top-10) then found **no recall improvement from CA3: 95.67% both on and off.** So the flagship feature, once properly wired and measured, **does not improve retrieval** -- it is gated **off** by default pending a measured gain. Retrieval is excellent (~95.7%) without it.
+  - *Semantic graph is entity-dominated, but lowering the 0.85 threshold would barely help (Phase 3, 2026-06-20):* live `arlo` synapses are entity 32,939 / temporal 6,262 / semantic 320 (0.8%). Of 4,830 sampled pairs, only **2** fall in cosine 0.75-0.85 and **0** above 0.85 -- the corpus is semantically diffuse, so the sparse semantic graph reflects the *data*, not mainly the threshold.
+  - **Phase 1 (2026-06-18):** the three scorers were unified onto `hybridSearch` (MCP + benchmark client delegate), and CA3 was fixed -- normalized (`ca3Score / maxCa3`, weight 0.25), able to inject, gated by `CORTEX_CA3`. Good changes.
+  - **CORRECTION (2026-06-18): the first CA3 A/B was INVALID -- a test artifact.** LoCoMo ingest discarded `hippocampalEncode` results -> no `hippocampal_codes` -> CA3 inert -> on==off by construction. *Fixed:* benchmark now persists DG codes (mirrors `api/ingest.ts`). **Phase 3 accuracy A/B (2026-06-20):** full-pipeline LoCoMo, n=231, top-10, CA3 off vs on -- **identical** R@1=53.2%, R@5=88.3%, R@10=95.7%, MRR=67.5%; miss lists byte-identical (`results-retrieval-top10-ca3off-l2.json` / `ca3on-l2.json`). **Decision: NEUTRAL -- keep CA3 ON (default), no `CA3_WEIGHT` change.** CA3 reshuffles on `arlo` (12/12 queries change top-10, 48 injections) but does not improve ground-truth session recall on LoCoMo. CA3 defaults ON (`CORTEX_CA3 !== "off"`); do not gate off by default.
 - **Compounding intelligence: 44%** on CogBench (its own benchmark) -- the "gets smarter over time" capability is the weakest measured.
 - **Emotional recall: 58%** on CogBench (`emotionalRecallAdvantage` 0.5). The valence machinery barely moves recall -- and the code explains why: `valence/analyzer.ts` is a hardcoded English keyword lexicon with crude `String.includes` substring matching (`"won"` matches "wonder", `"fire"` matches "fired"), presence-counts, and arbitrary multipliers. It is an admitted "Phase 1" stub, yet it feeds a real `0.10 * recall_boost` term in ranking. Worse, `RELEVANCE_CORE` includes `"cortex"/"memory"/"agent"`, so this self-referential corpus is systematically relevance-boosted toward meta-content.
 - **Dream synthesis is template filler, write-only.** Phase 5 produces exactly 30/night (its `LIMIT`); every `implication` is `Memory from [A] connects to [B]` from entity-set intersection (150 actionable / 48 not). ~198 accumulated, and since both search paths query `memory_nodes` (not `cognitive_artifacts`), they are **never retrieved**. (Phase 4 candidate generation is fine; Phase 5 is the gap -- see `CORTEX_DREAM_REASONING_UPGRADE.md`.)
@@ -59,6 +60,8 @@ The single highest-leverage move is not more features -- it is making the **one*
 - **Priority is inflated; no demotion.** ~~Live: P0=103, P1=350, P2=416, **P3/P4=0** (52% critical/high). Cause: CA1 `computeNovelty` promotes highly-novel content one tier (`max(0, basePriority-1)`), reflections/agents ingest at P1, and **nothing ever demotes** + the P1 cap guard was never shipped. Priority no longer discriminates for ranking or forgetting.~~ **FIXED 2026-06-18 (Phase 2):** CA1 no longer promotes priority from novelty (only resonance). New dream-cycle Phase 1b reconciles priority from sustained signals: demotes old/low-resonance/never-accessed P1->P2, enforces P0+P1 cap (25% target), and re-promotes genuinely active P2s. Pruning now reaches P1 (guarded). **Arlo before: P0=300(18.2%), P1=486(29.4%), P2=865(52.4%), P0/P1=47.6%. After: P0=300(18.2%), P1=113(6.8%), P2=1237(75.0%), P0/P1=25.0%.** Distribution converges and is stable across cycles.
 - **Forgetting barely happens -- and the root cause is the priority gate.** 874 active vs **32 archived lifetime** (~28 before this session's dupe cleanup); corpus grows monotonically since 2026-05-14. The dream's Phase-2 pruning is reasonable code (adaptive P5/P15 resonance percentiles, age gates, salience exemption) **but it only considers `priority > 1`** -- so the inflated 52% at P0/P1 is *structurally unprunable*, and the valence stub's `decay_resistance` exempts more. Pruning code is fine; it is defeated by upstream priority inflation. (The belief that "dream clustering keeps P1 manageable" is false.)
 - **Resonance measures popularity, not value.** Phase-1 resonance is dominated by `access_count` + connectivity + priority; the Ebbinghaus time-decay term is only weight 0.15 and is further slowed by a stability factor. So frequently-recalled/connected memories stay high while genuinely-useful-but-unaccessed notes look low-value (e.g. a local-LLM hardware note sat at resonance 0.5 simply because nothing had recalled it). Confirms the prior "resonance = salience, not correctness/stability" finding.
+- **~~`novelty_score` corrupted by live CA1 math bug~~ FIXED (2026-06-20).** Root cause: `sparseOverlap()` used unbounded min-sum (pairs reached 7.48+). **Fix shipped:** dot-product on shared indices (true sparse cosine, [0,1]), output clamp in `computeNovelty`, dream resonance SQL clamp, `scripts/backfill-novelty.ts`. **Arlo after backfill:** median **0.177** (was -1.98), mean 0.179, **0 negative / 1726 in [0,1]**.
+- **Lowering the 0.85 semantic-synapse threshold would NOT meaningfully enrich the graph (corrects an earlier suggestion).** Live synapses: entity 32,860 / temporal 6,252 / semantic 320. Of 4,830 sampled arlo pairs, only 2 sit in cosine 0.75-0.85 and 0 above 0.85 -- the corpus is semantically diffuse, so the sparse semantic graph reflects the *data*, not just the threshold. **DG pattern separation, by contrast, is verified working** (sparse Jaccard << dense cosine, order preserved).
 - **Embeddings are a generation behind.** On `voyage-3`; `voyage-4` series (Jan 2026) is strictly better; `voyage-code-3` likely better for this code-heavy corpus. All are 1024-dim (incl. local `mxbai-embed-large`), so a switch is a re-embed, not a schema change. Only a single retry on failure -> the ingest timeouts.
 
 ---
@@ -92,12 +95,43 @@ Method: LoCoMo retrieval-only benchmark, top-10, full hippocampal pipeline (syna
 - CA3 **on**: 231 questions, R@10 = 95.67%, MRR = 66.0%
 - Miss lists are identical.
 
-Conclusion: on this retrieval task, CA3 pattern completion does **not** improve recall. The no-CA3 hybrid already retrieves the correct session 95.7% of the time; CA3 neither added hits nor changed rankings meaningfully.
+Conclusion: that run was **invalid** (missing hippocampal codes). Superseded by Phase 3 below.
 
-### Implications
+### Implications (Phase 1)
 
 - The "three different scorers" divergence is resolved: benchmark, REST, and MCP now use one scorer.
-- CA3 remains mathematically interesting but is not earning its runtime cost or complexity on real retrieval. Recommendation: keep the fixed implementation, but **gate CA3 off by default** (`CORTEX_CA3=off`) and only re-enable after a future change demonstrates measurable recall gain. Document this in the benchmark baseline.
+
+---
+
+## Phase 3 Follow-up: CA3 accuracy + neuroscience probes (2026-06-20)
+
+### Task A -- CA3 accuracy A/B (valid full-pipeline)
+
+Method: LoCoMo retrieval-only, `--full-pipeline`, n=231 questions (2 conversations, cat5 excluded), top-10, hippocampal codes + synapses persisted, only `CORTEX_CA3` toggled.
+
+| Metric | CA3 off | CA3 on | Delta |
+|---|---|---|---|
+| R@1 | 53.2% | 53.2% | 0 |
+| R@5 | 88.3% | 88.3% | 0 |
+| R@10 | 95.7% | 95.7% | 0 |
+| MRR | 67.5% | 67.5% | 0 |
+
+Miss lists identical (10 misses each, same ranks). By category: Cat1 R@1=46.5%, Cat2 R@1=49.2% (weakest), Cat3 R@1=18.2%, Cat4 R@1=61.4%.
+
+**Decision:** **NEUTRAL.** Keep `CORTEX_CA3` **ON** (production default). No `CA3_WEIGHT` (0.25) tuning warranted -- CA3 reshuffles results on `arlo` but does not improve ground-truth session recall here. Generative F1 re-run with CA3 on vs 0.199 baseline still open.
+
+### Task B -- Neuroscience layer probes
+
+1. **Semantic graph / threshold (corrects earlier handoff):** Lowering `synapse-formation.ts` threshold from 0.85 to ~0.75 would **not** meaningfully enrich the graph. Live counts above; pair sampling shows almost no cosine-neighbor pairs in the 0.75-0.85 band. Graph enrichment is low-ROI unless corpus character changes.
+
+2. **DG pattern separation: VERIFIED.** Sparse Jaccard rises with dense cosine but stays well below it (orthogonalization). Low-cosine pairs near-zero overlap. DG is not the bottleneck.
+
+3. **CA1 novelty calibration: FIXED (2026-06-20).** See section 3. Next dream cycle will use clean novelty in resonance.
+
+### Harness improvements (this session)
+
+- `run-retrieval.ts`: added `--qlimit N` (cap questions/conversation) and CA3/semantic-threshold tags in output filenames.
+- `synapse-formation.ts`: `CORTEX_SEMANTIC_THRESHOLD` env override for experiments (default 0.85).
 
 ## 5. Operational findings
 
@@ -105,7 +139,7 @@ Conclusion: on this retrieval task, CA3 pattern completion does **not** improve 
 - **Ingest timeout -> duplicate race (caught live).** The MCP ingest writes server-side even when the call times out (large content -> Voyage+NER fan-out, ~25-30s/chunk). Retries then duplicate. This session created dup pairs `#1640~#1643` (0.989) and `#1641~#1644` (0.935); the dedup gate did not catch them (first write uncommitted when the retry's check ran). **Cleaned up:** archived `1640,1641,1642` and `1663` (redundant copies; complete copies kept at `1643-1646` and `1660-1662`). Fix: idempotency key on ingest, or a post-write dedup sweep, or raise/await the MCP timeout.
 - **`self_check` is blind to the scheduler** -- reports "0 cron jobs" though 7 Windows tasks fire. Cosmetic but misleading.
 - **Secrets:** live scan found **0** secret-shaped tokens. `scrub.ts` only scrubs em-dashes, not PII/secrets -- clean by practice, not by guard.
-- **Three divergent scoring formulas** (none match): benchmark (5-factor, no CA3); REST `hybridSearch` (adds emotional + CA3 blend); MCP `cortex_search` (`0.45/0.18/0.12/0.10/0.05` + `0.10` emotional, no CA3).
+- ~~**Three divergent scoring formulas**~~ **FIXED Phase 1:** benchmark, REST, and MCP now share `hybridSearch`.
 
 ---
 
@@ -118,8 +152,8 @@ Conclusion: on this retrieval task, CA3 pattern completion does **not** improve 
 
 ## 7. Ranked recommendations
 
-1. **~~Port a fixed CA3 into the MCP path and benchmark it honestly.~~ DONE (Phase 1, 2026-06-18).** MCP and REST now share `hybridSearch`; CA3 injection + normalization are fixed. The honest A/B on LoCoMo (n=231, full pipeline) found no recall improvement from CA3 (95.67% both on/off). Next: gate CA3 off by default and revisit only when a future change shows measurable gain.
-2. **Fix priority inflation:** add a demotion path + ship the P1 cap guard; reconsider CA1's one-tier promotion. Restore P3/P4 usage so priority discriminates again.
+1. **~~Port a fixed CA3 into the MCP path and benchmark it honestly.~~ DONE (Phases 1+3).** Valid full-pipeline A/B: CA3 neutral on LoCoMo accuracy (R@1/MRR unchanged). Keep ON by default; revisit if graph/corpus changes.
+2. **~~Fix CA1 `sparseOverlap` + backfill novelty~~ DONE (2026-06-20).** Next dream cycle will apply clean resonance; monitor pruning behavior.
 3. **Phase-5 dream reasoning upgrade** (see `CORTEX_DREAM_REASONING_UPGRADE.md`): replace the entity-intersection template with an LLM reasoning pass over Phase-4 candidates; make syntheses retrievable.
 4. **Stand up the local LLM** (removes Meridian coupling + ingest timeouts for NER).
 5. **Embeddings:** re-embed on `voyage-4` (test `voyage-code-3`); add a Voyage reranker pass at the REST layer; increase retry/backoff or move embeddings local.
@@ -131,7 +165,7 @@ Conclusion: on this retrieval task, CA3 pattern completion does **not** improve 
 
 ## 8. Remaining unknowns
 
-- **Run the generative F1 harness.** `locomo/run.ts` exists but has no committed result -- running it would give the first real end-to-end answer-accuracy number (today only retrieval recall is published).
+- **Generative F1 with CA3 on** vs the 0.199 baseline (`locomo/run.ts`, local Ollama preferred).
 - Whether the ~198 write-only synthesis artifacts should be pruned or surfaced.
 - Multi-agent isolation / `cross-agent-transfer` correctness beyond the 0.82 score.
 - Corpus composition is now known (584 api / 259 reflection / 37 markdown / 3 git-commit / 1 verified-api; reflections ~30%); still open is whether those nightly reflections are net-useful or noise.

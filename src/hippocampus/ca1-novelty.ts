@@ -148,6 +148,8 @@ export async function computeNovelty(
     noveltyScore = Math.min(noveltyScore * 1.3, 1.0);
   }
 
+  noveltyScore = Math.min(Math.max(noveltyScore, 0), 1);
+
   // ── Modulate resonance and priority ──
   // Novelty boosts RESONANCE (transient salience that decays over time), not
   // PRIORITY (which is a permanent structural slot). The old code promoted

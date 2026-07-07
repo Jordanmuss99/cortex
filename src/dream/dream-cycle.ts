@@ -18,6 +18,7 @@ interface DreamStats {
   phase4_nodesActivated: number;
   phase4_novelSynapses: number;
   phase5_synthesesCreated?: number;
+  phase5_synapsesPruned?: number;
   totalDurationMs: number;
 }
 
@@ -134,6 +135,7 @@ export async function runDreamCycle(
       console.error("[dream] Phase 5 [REM]: Synthesis");
       const synthesisResult = await phaseSynthesis(agentId, 24);
       stats.phase5_synthesesCreated = synthesisResult.synthesesCreated;
+      stats.phase5_synapsesPruned = synthesisResult.synapsesPruned;
       insights.push(...synthesisResult.insights);
     }
 
@@ -214,7 +216,7 @@ async function phaseResonanceAnalysis(agentId: number): Promise<number> {
           ELSE 0.5
         END
       + 0.1 * LEAST(mn.access_count / 10.0, 1.0)
-      + 0.1 * COALESCE(mn.novelty_score, 0.5)
+      + 0.1 * LEAST(GREATEST(COALESCE(mn.novelty_score, 0.5), 0.0), 1.0)
     ) * 10.0,
     updated_at = NOW()
     FROM synapse_strength ss
@@ -909,17 +911,26 @@ async function phaseFreeAssociation(agentId: number): Promise<{
 }
 
 /**
- * Phase 5: Synthesis — Novel Synapse Insight Generation
+ * Phase 5: Synthesis -- LLM-Powered Deep Reasoning
  *
- * Examines recently formed weak synapses (from free association),
- * loads both connected memory nodes, extracts the unexpected connection,
- * and stores as a "synthesis" cognitive artifact.
+ * Examines recently formed weak synapses (from free association Phase 4),
+ * loads both connected memory nodes, and asks a reasoning model to judge
+ * whether the link is real and meaningful -- producing a structured
+ * judgment (relation type, insight, hypothesis, confidence) instead of
+ * a template.
+ *
+ * Low-confidence or coincidence verdicts prune the weak synapse (quality
+ * filter on the graph). High-confidence verdicts store a rich synthesis
+ * artifact with the model's insight.
+ *
+ * Falls back to the old template synthesis if the LLM is unavailable.
  */
 export async function phaseSynthesis(
   agentId: number,
   hours = 24
 ): Promise<{
   synthesesCreated: number;
+  synapsesPruned: number;
   insights: Array<{ type: string; description: string }>;
 }> {
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
@@ -944,53 +955,124 @@ export async function phaseSynthesis(
   `);
 
   let synthesesCreated = 0;
+  let synapsesPruned = 0;
 
   for (const row of novelSynapses.rows as Array<{
     id: number; memory_a: number; memory_b: number; connection_strength: number;
     content_a: string; entities_a: string[]; source_a: string | null;
     content_b: string; entities_b: string[]; source_b: string | null;
   }>) {
-    const summaryA = row.content_a.slice(0, 200);
-    const summaryB = row.content_b.slice(0, 200);
-
-    // Find shared entities as the "common thread"
+    const summaryA = row.content_a.slice(0, 700);
+    const summaryB = row.content_b.slice(0, 700);
     const entitiesA = new Set(row.entities_a || []);
     const entitiesB = new Set(row.entities_b || []);
     const shared = [...entitiesA].filter(e => entitiesB.has(e));
 
-    const connection = shared.length > 0
-      ? `Shared entities: ${shared.join(", ")}`
-      : `Semantic similarity (strength: ${row.connection_strength.toFixed(2)})`;
+    // ── Try LLM reasoning ──
+    let synthesisArtifact: Record<string, unknown> | null = null;
+    let shouldPruneSynapse = false;
 
-    const srcA = row.source_a?.split("/").pop() || "unknown";
-    const srcB = row.source_b?.split("/").pop() || "unknown";
-    const implication = `Memory from [${srcA}] connects to [${srcB}] via ${connection}`;
+    try {
+      const { llmComplete } = await import("../lib/llm.js");
+      const { stripThinkTags } = await import("../lib/scrub.js");
 
-    // Store as cognitive artifact
-    await db.insert(schema.cognitiveArtifacts).values({
-      agentId,
-      artifactType: "synthesis",
-      content: scrubEmDashes({
-        nodeA: { id: row.memory_a, summary: summaryA },
-        nodeB: { id: row.memory_b, summary: summaryB },
+      const prompt = `You consolidate memory. Given two memories that a cheap similarity pass flagged as possibly related, decide whether the link is real and meaningful. Be skeptical -- most flagged pairs are coincidence. Respond ONLY as JSON.
+
+Memory A [${row.source_a?.split("/").pop() || "unknown"}]: "${summaryA}"
+Memory B [${row.source_b?.split("/").pop() || "unknown"}]: "${summaryB}"
+Shared entities: ${shared.length > 0 ? shared.join(", ") : "none"}
+
+Respond as JSON:
+{
+  "relation": "contradiction | generalization | cause_effect | analogy | reinforcement | coincidence",
+  "insight": "1-2 sentences on what the connection means / why it matters",
+  "hypothesis": "optional testable hypothesis, or null",
+  "confidence": 0.0,
+  "actionable": false
+}`;
+
+      const llmResult = await llmComplete(
+        [{ role: "user", content: prompt }],
+        { maxTokens: 300, temperature: 0.3, system: "You are a memory consolidation engine. Respond only with valid JSON." }
+      );
+
+      // Strip think tags from reasoning models
+      const cleaned = stripThinkTags(llmResult.content);
+
+      // Extract JSON block (tolerate preceding text)
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const judgment = JSON.parse(jsonMatch[0]);
+        const confidence = Number(judgment.confidence) || 0;
+        const relation = String(judgment.relation || "coincidence");
+
+        // Prune coincidences and low-confidence verdicts
+        if (relation === "coincidence" || confidence < 0.5) {
+          shouldPruneSynapse = true;
+          console.error(`[dream] Phase 5: Pruning synapse #${row.id} (${relation}, conf ${confidence.toFixed(2)})`);
+        } else {
+          synthesisArtifact = {
+            nodeA: { id: row.memory_a, summary: summaryA.slice(0, 200) },
+            nodeB: { id: row.memory_b, summary: summaryB.slice(0, 200) },
+            relation,
+            insight: String(judgment.insight || ""),
+            hypothesis: judgment.hypothesis || null,
+            confidence,
+            actionable: Boolean(judgment.actionable),
+            model: llmResult.model,
+            synapseId: row.id,
+          };
+        }
+      }
+    } catch (err) {
+      console.error(`[dream] Phase 5: LLM reasoning failed, falling back to template: ${err}`);
+    }
+
+    // ── Fallback: template synthesis ──
+    if (!synthesisArtifact && !shouldPruneSynapse) {
+      const connection = shared.length > 0
+        ? `Shared entities: ${shared.join(", ")}`
+        : `Semantic similarity (strength: ${row.connection_strength.toFixed(2)})`;
+      const srcA = row.source_a?.split("/").pop() || "unknown";
+      const srcB = row.source_b?.split("/").pop() || "unknown";
+      synthesisArtifact = {
+        nodeA: { id: row.memory_a, summary: summaryA.slice(0, 200) },
+        nodeB: { id: row.memory_b, summary: summaryB.slice(0, 200) },
         connection,
-        implication,
+        implication: `Memory from [${srcA}] connects to [${srcB}] via ${connection}`,
         actionable: shared.length > 0,
-      }),
-      resonanceScore: 5.0,
-    });
+        fallback: true,
+      };
+    }
 
-    synthesesCreated++;
-    if (synthesesCreated <= 5) {
-      insights.push({
-        type: "synthesis",
-        description: implication,
+    // ── Store synthesis artifact ──
+    if (synthesisArtifact) {
+      await db.insert(schema.cognitiveArtifacts).values({
+        agentId,
+        artifactType: "synthesis",
+        content: scrubEmDashes(synthesisArtifact),
+        resonanceScore: 5.0,
       });
+      synthesesCreated++;
+      if (synthesesCreated <= 5) {
+        const insight = (synthesisArtifact as { insight?: string; implication?: string }).insight
+          || (synthesisArtifact as { implication?: string }).implication
+          || "synthesis";
+        insights.push({ type: "synthesis", description: insight.slice(0, 120) });
+      }
+    }
+
+    // ── Prune weak synapse for coincidence/low-confidence verdicts ──
+    if (shouldPruneSynapse) {
+      await db.execute(sql`
+        DELETE FROM memory_synapses WHERE id = ${row.id}
+      `);
+      synapsesPruned++;
     }
   }
 
-  console.error(`[dream] Phase 5: Created ${synthesesCreated} synthesis insights`);
-  return { synthesesCreated, insights };
+  console.error(`[dream] Phase 5: Created ${synthesesCreated} synthesis insights, pruned ${synapsesPruned} weak synapses`);
+  return { synthesesCreated, synapsesPruned, insights };
 }
 
 // ─── CLI / Cron Entry Point ─────────────────────────────

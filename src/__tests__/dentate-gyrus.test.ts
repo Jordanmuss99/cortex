@@ -60,27 +60,27 @@ describe("Dentate Gyrus — Pattern Separation", () => {
   });
 
   describe("sparseOverlap", () => {
-    it("should return maximum overlap for identical codes", () => {
+    it("should return 1.0 for identical L2-normalized codes", () => {
       const emb = makeEmbedding(42);
       const code = dgEncode(emb);
-      const selfOverlap = sparseOverlap(code, code);
+      expect(sparseOverlap(code, code)).toBeCloseTo(1.0, 5);
+    });
 
-      // Self-overlap is the sum of all values (since min(v,v)=v for each index)
-      // This should be the maximum possible overlap for this code
-      expect(selfOverlap).toBeGreaterThan(0);
-
-      // Any other code should have strictly less overlap
-      const other = dgEncode(makeEmbedding(999));
-      expect(sparseOverlap(code, other)).toBeLessThan(selfOverlap);
+    it("should always stay in [0, 1] for random pairs", () => {
+      for (let s = 0; s < 20; s++) {
+        const code1 = dgEncode(makeEmbedding(s));
+        const code2 = dgEncode(makeEmbedding(s + 1000));
+        const overlap = sparseOverlap(code1, code2);
+        expect(overlap).toBeGreaterThanOrEqual(0);
+        expect(overlap).toBeLessThanOrEqual(1);
+      }
     });
 
     it("should return lower overlap for dissimilar inputs than identical", () => {
       const code1 = dgEncode(makeEmbedding(1));
       const code2 = dgEncode(makeEmbedding(999));
-      const selfOverlap = sparseOverlap(code1, code1);
 
-      // Cross-overlap should be strictly less than self-overlap
-      expect(sparseOverlap(code1, code2)).toBeLessThan(selfOverlap);
+      expect(sparseOverlap(code1, code2)).toBeLessThan(sparseOverlap(code1, code1));
     });
 
     it("should return partial overlap for moderately different inputs", () => {
@@ -88,7 +88,6 @@ describe("Dentate Gyrus — Pattern Separation", () => {
       const code2 = dgEncode(makeEmbedding(43));
 
       const overlap = sparseOverlap(code1, code2);
-      // Different seeds produce different embeddings — overlap should be partial
       expect(overlap).toBeGreaterThanOrEqual(0);
       expect(overlap).toBeLessThan(1.0);
     });

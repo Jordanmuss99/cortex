@@ -10,6 +10,23 @@
  */
 export function scrubEmDashes<T>(content: T): T {
   const json = JSON.stringify(content);
-  if (json === undefined || !json.includes("—")) return content;
-  return JSON.parse(json.replace(/—/g, "--")) as T;
+  if (json === undefined || !json.includes("\u2014")) return content;
+  return JSON.parse(json.replace(/\u2014/g, "--")) as T;
+}
+
+/**
+ * Strip think-tag blocks from reasoning model output.
+ *
+ * Reasoning models like DeepSeek-R1 emit <think>...</think> blocks,
+ * and Qwen3 emits a thinking segment. These should not be stored in
+ * cognitive artifacts. This function removes them and returns only
+ * the final answer content.
+ */
+export function stripThinkTags(text: string): string {
+  // Remove <think>...</think> blocks (DeepSeek-R1 style)
+  let result = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // Remove standalone <think> tags if not properly closed
+  result = result.replace(/<think>[\s\S]*$/i, "");
+  // Remove leading/trailing whitespace
+  return result.trim();
 }
