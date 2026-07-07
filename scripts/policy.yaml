@@ -1,0 +1,7 @@
+on_http_request:
+  - actions:
+    - type: basic-auth
+      config:
+        credentials:
+          # add up to 10 username:password pairs, all stored safely in a vault
+          - mcp:${secrets.get('basic-auth-vault', '5!JR@4E74jeSTp')}

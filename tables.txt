@@ -1,0 +1,18 @@
+                                          List of relations
+ Schema |        Name         | Type  | Owner  | Persistence | Access method |  Size   | Description 
+--------+---------------------+-------+--------+-------------+---------------+---------+-------------
+ public | agent_state_logs    | table | cortex | permanent   | heap          | 216 kB  | 
+ public | agents              | table | cortex | permanent   | heap          | 16 kB   | 
+ public | background_threads  | table | cortex | permanent   | heap          | 16 kB   | 
+ public | cognitive_artifacts | table | cortex | permanent   | heap          | 1568 kB | 
+ public | dream_cycle_logs    | table | cortex | permanent   | heap          | 144 kB  | 
+ public | emotional_valence   | table | cortex | permanent   | heap          | 224 kB  | 
+ public | hippocampal_codes   | table | cortex | permanent   | heap          | 3872 kB | 
+ public | memory_nodes        | table | cortex | permanent   | heap          | 12 MB   | 
+ public | memory_synapses     | table | cortex | permanent   | heap          | 3488 kB | 
+ public | principal_state     | table | cortex | permanent   | heap          | 16 kB   | 
+ public | procedural_memories | table | cortex | permanent   | heap          | 432 kB  | 
+ public | relationship_graph  | table | cortex | permanent   | heap          | 16 kB   | 
+ public | self_diagnostics    | table | cortex | permanent   | heap          | 48 kB   | 
+(13 rows)
+

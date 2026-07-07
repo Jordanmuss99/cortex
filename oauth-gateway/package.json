@@ -1,0 +1,12 @@
+{
+  "name": "cortex-oauth-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.3",
+    "jose": "^5.9.6"
+  }
+}

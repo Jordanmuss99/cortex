@@ -1,0 +1,13 @@
+version: "3"
+# Cortex remote access tunnels (merged with your user ngrok.yml for authtoken).
+# Usage: .\scripts\run-ngrok-tunnels.ps1
+tunnels:
+  glm-model:
+    # GLM-5.2 model on CT100 (reached over the LAN). Auth is enforced by the
+    # model's own --api-key (Bearer), so no basic_auth here.
+    addr: 192.168.30.21:8081
+    proto: http
+    schemes:
+      - https
+    # For a STABLE URL in Cursor, assign your ngrok reserved/static domain:
+    # domain: your-name.ngrok-free.app

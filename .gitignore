@@ -13,4 +13,11 @@ benchmarks/locomo/locomo10.json
 
 # Agent/tooling state (not Cortex source)
 .omc/
+.omo/
 .sisyphus/
+oauth-gateway/server.js.bak.2026-07-05-080657
+oauth-gateway/server.js.bak.2026-07-05-081055
+oauth-gateway/server.js.bak.2026-07-06-113746
+oauth-gateway/server.js.bak.2026-07-06-113757
+oauth-gateway/server.js.bak.2026-07-06-113838
+oauth-gateway/server.js.bak.2026-07-06-115409

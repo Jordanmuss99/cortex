@@ -1,0 +1,115 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: cortex-db
+    restart: unless-stopped
+    networks:
+      - cortex-network
+    environment:
+      POSTGRES_USER: "cortex"
+      POSTGRES_PASSWORD: "cortex"
+      POSTGRES_DB: "cortex"
+    volumes:
+      - cortex-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  cortex:
+    build: .
+    restart: unless-stopped
+    networks:
+      - cortex-network
+    environment:
+      DATABASE_URL: "postgresql://cortex:cortex@cortex-db:5432/cortex"
+      EMBEDDING_PROVIDER: "voyage"
+      VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      CORTEX_DUP_THRESHOLD: "${CORTEX_DUP_THRESHOLD:-}"
+      CORTEX_VITALS_THRESHOLDS: "${CORTEX_VITALS_THRESHOLDS:-}"
+      CORTEX_LLM_PROVIDER: "ollama_cloud"
+      CORTEX_LLM_MODEL: "glm-5.2:cloud"
+      OLLAMA_CLOUD_URL: "https://ollama.com/v1"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY}"
+      CORTEX_LLM_ENTITIES: "true"
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      - db
+
+  cortex-mcp:
+    build: .
+    restart: unless-stopped
+    networks:
+      - cortex-network
+    environment:
+      DATABASE_URL: "postgresql://cortex:cortex@cortex-db:5432/cortex"
+      EMBEDDING_PROVIDER: "voyage"
+      VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      CORTEX_LLM_PROVIDER: "ollama_cloud"
+      CORTEX_LLM_MODEL: "glm-5.2:cloud"
+      OLLAMA_CLOUD_URL: "https://ollama.com/v1"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY}"
+      CORTEX_LLM_ENTITIES: "true"
+    ports:
+      - "8001:8000"
+    stdin_open: true
+    tty: true
+    command:
+      [
+        "npx",
+        "-y",
+        "supergateway",
+        "--stdio",
+        "npx tsx src/mcp/server.ts",
+        "--outputTransport",
+        "streamableHttp",
+        "--port",
+        "8000",
+        "--streamableHttpPath",
+        "/mcp",
+      ]
+    depends_on:
+      - db
+
+  cortex-oauth-gateway:
+    build: ./oauth-gateway
+    container_name: cortex-oauth-gateway
+    restart: unless-stopped
+    networks:
+      - cortex-network
+    environment:
+      BASE_URL: "https://cortex.obsidiannetwork.au"
+      RESOURCE_URL: "https://cortex.obsidiannetwork.au/mcp"
+      ISSUER_URL: "https://cortex.obsidiannetwork.au"
+      MCP_TARGET: "http://cortex-mcp:8000"
+      REST_TARGET: "http://cortex:3100"
+      MCP_OAUTH_USERNAME: "${MCP_OAUTH_USERNAME}"
+      MCP_OAUTH_PASSWORD: "${MCP_OAUTH_PASSWORD}"
+      MCP_OAUTH_JWT_SECRET: "${MCP_OAUTH_JWT_SECRET}"
+      LINEAR_OAUTH_CLIENT_ID: "${LINEAR_OAUTH_CLIENT_ID:-linear-cortex}"
+      LINEAR_OAUTH_CLIENT_SECRET: "${LINEAR_OAUTH_CLIENT_SECRET:-}"
+      LINEAR_OAUTH_REDIRECT_URI: "${LINEAR_OAUTH_REDIRECT_URI:-https://linear.app/connect/mcp/callback}"
+      NOTION_OAUTH_CLIENT_ID: "${NOTION_OAUTH_CLIENT_ID:-notion-cortex}"
+      NOTION_OAUTH_CLIENT_SECRET: "${NOTION_OAUTH_CLIENT_SECRET:-}"
+      NOTION_OAUTH_REDIRECT_URI: "${NOTION_OAUTH_REDIRECT_URI:-https://app.notion.com/workflows/mcp/oauth/callback}"
+      LINEAR_OAUTH_CLIENT_ID: "${LINEAR_OAUTH_CLIENT_ID:-linear-cortex}"
+      LINEAR_OAUTH_CLIENT_SECRET: "${LINEAR_OAUTH_CLIENT_SECRET:-}"
+      LINEAR_OAUTH_REDIRECT_URI: "${LINEAR_OAUTH_REDIRECT_URI:-https://linear.app/connect/mcp/callback}"
+    ports:
+      - "8091:8080"
+    depends_on:
+      - cortex
+      - cortex-mcp
+
+volumes:
+  cortex-pgdata:
+    external: true
+
+networks:
+  cortex-network:
+    external: true
