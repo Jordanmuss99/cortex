@@ -3,11 +3,14 @@
   "version": "2.4.0",
   "description": "Synthetic cognition infrastructure for AI agents",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "build": "tsc && node scripts/copy-runtime-assets.mjs",
+    "start": "node dist/src/index.js",
+    "worker": "tsx src/worker.ts",
+    "memory:retry-ingest": "node dist/scripts/retry-memory-ingest.js",
+    "memory:retry-ingest:source": "tsx scripts/retry-memory-ingest.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
@@ -17,11 +20,23 @@
     "watch": "tsx src/watcher.ts",
     "mcp": "tsx src/mcp/server.ts",
     "migrate": "tsx scripts/run-migrations.ts",
+    "migrate:compiled": "node dist/scripts/run-migrations.js",
+    "oauth:prepare": "tsx scripts/prepare-oauth-database.ts",
+    "oauth:prepare:compiled": "node dist/scripts/prepare-oauth-database.js",
+    "oauth:admin": "node oauth-gateway/admin.js",
+    "oauth:verify-deployment": "node scripts/verify-deployment-boundary.mjs",
+    "oauth:verify-recovery": "node scripts/verify-oauth-restore-recovery.mjs",
+    "test:oauth:release-candidate": "node scripts/verify-oauth-release-candidate.mjs",
+    "test:oauth:deployment": "node --test scripts/verify-deployment-boundary.test.mjs",
+    "test:oauth:database": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --runTestsByPath src/__tests__/oauth-database.integration.test.ts",
+    "test:oauth:integration": "node scripts/run-oauth-integration-tests.mjs",
+    "test:memory:database": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --runTestsByPath src/__tests__/memory-lifecycle.integration.test.ts",
+    "test:memory:integration": "node scripts/run-memory-integration-tests.mjs",
     "backfill:hippocampal": "tsx scripts/backfill-hippocampal.ts",
     "cogbench:generate": "tsx benchmarks/cogbench/generate.ts",
     "cogbench:run": "tsx benchmarks/cogbench/run.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests --testPathIgnorePatterns='(oauth-database|memory-lifecycle)\\.integration\\.test\\.ts$'",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch"
   },
   "keywords": [
@@ -47,31 +62,36 @@
     "url": "https://github.com/aterna-ai/cortex/issues"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.82.0",
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@anthropic-ai/sdk": "^0.122.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@neondatabase/serverless": "^0.10.4",
     "chokidar": "^4.0.3",
     "commander": "^13.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "drizzle-orm": "^0.38.4",
-    "express": "^4.21.2",
+    "drizzle-orm": "^0.45.2",
+    "express": "^4.22.2",
     "gpt-tokenizer": "^2.8.1",
     "openai": "^6.33.0",
     "postgres": "^3.4.8",
-    "voyageai": "^0.0.3-1",
-    "zod": "^3.24.2"
+    "undici": "^8.10.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.12.0",
-    "drizzle-kit": "^0.30.4",
+    "drizzle-kit": "^0.31.10",
     "jest": "^30.3.0",
     "ts-jest": "^29.4.9",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.28.2"
+    }
   },
   "engines": {
     "node": ">=22.0.0"

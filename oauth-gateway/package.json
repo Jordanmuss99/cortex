@@ -3,10 +3,23 @@
   "version": "0.1.0",
   "type": "module",
   "main": "server.js",
+  "scripts": {
+    "admin": "node admin.js",
+    "test": "npm run test:unit",
+    "test:unit": "node --test admin.test.js agent-policy.test.js chatgpt-tools.test.js legacy-state.test.js oauth-crypto.test.js security-log.test.js server-entry.test.js server-v2.test.js server.test.js",
+    "test:integration": "node --test --test-concurrency=1 oauth-store.integration.test.js oauth-happy-path.integration.test.js release-image.integration.test.js"
+  },
   "dependencies": {
+    "ajv": "^8.17.1",
     "cookie-parser": "^1.4.7",
     "express": "^4.19.2",
-    "http-proxy-middleware": "^3.0.3",
-    "jose": "^5.9.6"
+    "http-proxy-middleware": "^4.2.0",
+    "jose": "^5.9.6",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   }
 }

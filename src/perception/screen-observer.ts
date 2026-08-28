@@ -11,16 +11,20 @@
  *
  * macOS (legacy path): Peekaboo / AppleScript window metadata only.
  */
-import { db, schema } from "../db/index.js";
 import { execSync } from "child_process";
 import { existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { extractEntitiesSync as extractEntities, extractSemanticTags } from "../ingestion/entities.js";
-import { formSynapses } from "../ingestion/synapse-formation.js";
-import { embedTexts } from "../ingestion/embeddings.js";
+import { createMemoryServices } from "../memory/index.js";
+import { deriveObservationIngestKey } from "../memory/ingest.js";
+import type {
+  IngestReceipt,
+  IngestService,
+  IngestStatus,
+} from "../memory/types.js";
 
-interface ScreenObservation {
+export interface ScreenObservation {
   activeApp: string;
   windowTitle: string;
   description: string;
@@ -28,6 +32,48 @@ interface ScreenObservation {
   timestamp: string;
   /** Absolute path of the saved screenshot PNG (Windows), or null. */
   screenshotPath: string | null;
+}
+
+/** Preserve the legacy MCP contract: only an explicit false disables storage. */
+export function shouldStoreScreenObservation(
+  store: boolean | null | undefined
+): boolean {
+  return store ?? true;
+}
+
+type ScreenCaptureFailureReason =
+  | "headless"
+  | "unsupported_platform"
+  | "capture_failed";
+
+export class ScreenCaptureUnavailableError extends Error {
+  readonly code = "screen_capture_unavailable";
+
+  constructor(
+    readonly platform: NodeJS.Platform,
+    readonly reason: ScreenCaptureFailureReason
+  ) {
+    const message = reason === "headless"
+      ? "Screen observation is unavailable in headless mode. The hosted Cortex MCP server cannot capture the ChatGPT user's device screen."
+      : reason === "unsupported_platform"
+        ? `Screen observation is unsupported on platform "${platform}". Only Windows and macOS desktop sessions are supported.`
+        : `Screen observation failed on platform "${platform}" because no usable screen or foreground-window data was captured.`;
+
+    super(message);
+    this.name = "ScreenCaptureUnavailableError";
+  }
+}
+
+export function resolveScreenCapturePlatform(
+  platform: NodeJS.Platform = process.platform,
+  headless = process.env.CORTEX_HEADLESS === "true"
+): "windows" | "macos" {
+  if (headless) {
+    throw new ScreenCaptureUnavailableError(platform, "headless");
+  }
+  if (platform === "win32") return "windows";
+  if (platform === "darwin") return "macos";
+  throw new ScreenCaptureUnavailableError(platform, "unsupported_platform");
 }
 
 function runCommand(cmd: string): string {
@@ -167,37 +213,67 @@ function captureMacOS(): ScreenObservation {
 }
 
 export async function captureAndAnalyze(): Promise<ScreenObservation> {
-  return process.platform === "win32" ? captureWindows() : captureMacOS();
+  const capturePlatform = resolveScreenCapturePlatform();
+  const observation = capturePlatform === "windows"
+    ? captureWindows()
+    : captureMacOS();
+
+  if (
+    observation.activeApp === "Unknown" &&
+    observation.windowTitle === "Unknown" &&
+    observation.screenshotPath === null
+  ) {
+    throw new ScreenCaptureUnavailableError(process.platform, "capture_failed");
+  }
+
+  return observation;
 }
 
-export async function ingestObservation(agentId: number, observation: ScreenObservation): Promise<number[]> {
+export interface ObservationIngestDependencies {
+  ingest?: IngestService;
+  waitMs?: number;
+}
+
+export async function ingestObservation(
+  agentId: number,
+  observation: ScreenObservation,
+  dependencies: ObservationIngestDependencies = {}
+): Promise<IngestReceipt> {
   const content = `[Screen Observation ${observation.timestamp}] App: ${observation.activeApp}, Window: "${observation.windowTitle}". ${observation.description}`;
-
-  const entities = observation.entities;
-  const tags = ["observation", ...extractSemanticTags(content)];
-  const embeddings = await embedTexts([content]);
-
-  const [inserted] = await db
-    .insert(schema.memoryNodes)
-    .values({
-      agentId,
-      content,
-      source: observation.screenshotPath || "screen-observer",
-      sourceType: "observation",
-      chunkIndex: 0,
-      embedding: embeddings[0],
-      entities,
-      semanticTags: tags,
-      priority: 3, // Low priority, ephemeral
-      resonanceScore: 3.0,
-      status: "active",
-    })
-    .returning({ id: schema.memoryNodes.id });
-
-  // Form synapses with existing memories
-  await formSynapses(agentId, [inserted.id]);
-
-  return [inserted.id];
+  const ingest = dependencies.ingest ?? createMemoryServices().ingest;
+  const accepted = await ingest.accept({
+    agentId,
+    content,
+    idempotencyKey: deriveObservationIngestKey(
+      observation.timestamp,
+      observation.activeApp,
+      observation.windowTitle,
+      content
+    ),
+    source: observation.screenshotPath || "screen-observer",
+    sourceType: "observation",
+    observedAt: observation.timestamp,
+    requestedPriority: 3,
+    providedEntities: observation.entities,
+    providedSemanticTags: ["observation", ...extractSemanticTags(content)],
+  });
+  const waitMs = Math.max(0, Math.trunc(dependencies.waitMs ?? 20_000));
+  if (
+    waitMs === 0 ||
+    !new Set<IngestStatus>(["accepted", "processing"]).has(accepted.status)
+  ) {
+    return accepted;
+  }
+  try {
+    const waited = await ingest.wait(agentId, accepted.eventId, waitMs);
+    return { ...waited, replayed: accepted.replayed };
+  } catch {
+    console.error("[observation] Optional ingest wait failed", {
+      eventId: accepted.eventId,
+      code: "observation_wait_failed",
+    });
+    return accepted;
+  }
 }
 
 export function formatObservation(observation: ScreenObservation): string {

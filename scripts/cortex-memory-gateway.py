@@ -13,9 +13,9 @@ model provider.  Every request gets:
 
   FORWARD -> real provider (Ollama / OpenAI / Anthropic-compatible).
 
-  POST (async, never blocks the response):
-    4. Capture exchange -> Cortex /ingest (dedup gate on).
-    5. Honor "// VERIFIED" breadcrumbs as priority writes.
+  POST (after model output, before handler completion):
+    4. Capture exchange -> durable Cortex /ingest acceptance.
+    5. Honor "// VERIFIED" breadcrumbs as requested-priority signals.
 
 Run:
     python gateway.py                         # defaults
@@ -26,7 +26,6 @@ Config via env (all have safe defaults):
     CORTEX_AGENT_ID      arlo
     CORTEX_RECALL_BUDGET 1200        (tokens of recall per task boundary)
     CORTEX_RECALL_THROTTLE_MS 600000  (10-min window; 0 = every request)
-    CORTEX_CAPTURE_MIN_CHARS 200     (skip trivial exchanges)
     CORTEX_UPSTREAM      http://127.0.0.1:11434/v1
     CORTEX_GATEWAY_BIND  127.0.0.1
     CORTEX_GATEWAY_PORT  3101
@@ -43,12 +42,15 @@ Conventions: -- not em-dashes (repo standing-order; drift check counts them).
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
+import unicodedata
 from typing import Any, Optional
 
 import httpx
@@ -61,12 +63,6 @@ CORTEX_REST_BASE = os.getenv("CORTEX_REST_BASE", "http://127.0.0.1:3100").rstrip
 CORTEX_AGENT_ID = os.getenv("CORTEX_AGENT_ID", "arlo")
 CORTEX_RECALL_BUDGET = int(os.getenv("CORTEX_RECALL_BUDGET", "1200"))
 CORTEX_RECALL_THROTTLE_MS = int(os.getenv("CORTEX_RECALL_THROTTLE_MS", "600000"))
-CORTEX_CAPTURE_MIN_CHARS = int(os.getenv("CORTEX_CAPTURE_MIN_CHARS", "200"))
-# Client-side capture dedup window: if the same user turn was captured
-# within this window, skip re-capture.  Prevents duplicate memories from
-# retries, A/B tests, and re-sent messages.  The REST ingest's own dedup
-# gate only covers single-chunk content; this covers multi-chunk.
-CORTEX_CAPTURE_DEDUP_MS = int(os.getenv("CORTEX_CAPTURE_DEDUP_MS", "300000"))  # 5 min
 CORTEX_UPSTREAM = os.getenv("CORTEX_UPSTREAM", "http://127.0.0.1:11434/v1").rstrip("/")
 CORTEX_GATEWAY_BIND = os.getenv("CORTEX_GATEWAY_BIND", "127.0.0.1")
 CORTEX_GATEWAY_PORT = int(os.getenv("CORTEX_GATEWAY_PORT", "3101"))
@@ -98,17 +94,12 @@ _last_recall_ts: dict[str, float] = {}
 _last_recall_query: dict[str, str] = {}
 _last_recall_block: dict[str, str] = {}
 
-# Capture dedup cache: maps user-turn key -> last-capture timestamp (epoch ms).
-# Prevents the same exchange from being ingested twice (retries, A/B tests).
-_last_capture_ts: dict[str, float] = {}
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Match "// VERIFIED" breadcrumbs anywhere in user content.  These signal
-# that the captured exchange contains a durable, high-confidence fact that
-# should be written at elevated priority.
+# Match "// VERIFIED" breadcrumbs anywhere in user content. These request
+# elevated priority; Cortex's central ingest policy decides effective priority.
 _VERIFIED_RE = re.compile(r"//\s*VERIFIED", re.IGNORECASE)
 
 # A "task boundary" heuristic: if the latest user message is short and
@@ -120,17 +111,164 @@ _TRIVIAL_TURN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Match ECMAScript String.prototype.trim exactly so Python-derived gateway
+# keys stay byte-for-byte identical to the TypeScript contract. Python's
+# str.strip() differs for U+FEFF and U+0085.
+_ECMASCRIPT_TRIM_CHARS = (
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 
-def _session_key(messages: list[dict]) -> str:
-    """Derive a stable session key from the system messages' combined hash.
 
-    Falls back to 'default' if there are no system messages (rare for Hermes).
-    """
-    sys_msgs = [m.get("content", "") for m in messages if m.get("role") == "system"]
-    if not sys_msgs:
-        return "default"
-    blob = "|".join(sys_msgs)[:512]
-    return str(hash(blob))
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    """Use compact UTF-8 JSON; string-array keys match JSON.stringify exactly."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _normalized_identity(value: str) -> str:
+    return unicodedata.normalize("NFC", value).strip(_ECMASCRIPT_TRIM_CHARS)
+
+
+def derive_capture_idempotency_key(
+    session_id: str,
+    turn_id: str,
+    content: str,
+) -> str:
+    """Derive the same stable gateway key as the TypeScript ingest service."""
+    components = [
+        "gateway-capture-v1",
+        _normalized_identity(session_id),
+        _normalized_identity(turn_id),
+        _sha256(content),
+    ]
+    return f"gateway:v1:{_sha256(_canonical_json(components))}"
+
+
+def _identity_candidate(*values: Any) -> Optional[str]:
+    for value in values:
+        if isinstance(value, (str, int)):
+            normalized = _normalized_identity(str(value))
+            if normalized:
+                return normalized
+    return None
+
+
+def _header_value(headers: Any, name: str) -> Any:
+    value = headers.get(name)
+    if value is not None:
+        return value
+    try:
+        for key, candidate in headers.items():
+            if str(key).lower() == name:
+                return candidate
+    except (AttributeError, TypeError):
+        pass
+    return None
+
+
+def _bounded_origin_id(kind: str, value: str) -> str:
+    normalized = _normalized_identity(value)
+    if len(normalized) <= 128:
+        return normalized
+    return f"{kind}:{_sha256(normalized)}"
+
+
+def _conversation_lineage(protocol: str, payload: dict) -> tuple[Any, int, Any]:
+    """Return stable session seed records plus the latest user turn identity."""
+    field = payload.get("messages") if protocol == "chat" else payload.get("input")
+    if isinstance(field, str):
+        user = {"role": "user", "content": field}
+        return ([user], 0, user)
+    if not isinstance(field, list):
+        return ([], -1, None)
+    stable_prefix: list[Any] = []
+    first_user_seen = False
+    last_user = -1
+    last_user_record: Any = None
+    for index, item in enumerate(field):
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if not first_user_seen and role in ("system", "developer"):
+            stable_prefix.append(item)
+        if role == "user":
+            if not first_user_seen:
+                stable_prefix.append(item)
+                first_user_seen = True
+            last_user = index
+            last_user_record = item
+    return (stable_prefix, last_user, last_user_record)
+
+
+def derive_capture_lineage(
+    protocol: str,
+    payload: dict,
+    headers: Any,
+) -> tuple[str, str]:
+    """Resolve caller lineage, with deterministic request-derived fallbacks."""
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    session_id = _identity_candidate(
+        _header_value(headers, "x-cortex-session-id"),
+        payload.get("session_id"),
+        payload.get("sessionId"),
+        payload.get("conversation_id"),
+        payload.get("conversationId"),
+        metadata.get("session_id"),
+        metadata.get("sessionId"),
+        metadata.get("conversation_id"),
+        metadata.get("conversationId"),
+    )
+    turn_id = _identity_candidate(
+        _header_value(headers, "x-cortex-turn-id"),
+        _header_value(headers, "idempotency-key"),
+        payload.get("turn_id"),
+        payload.get("turnId"),
+        payload.get("request_id"),
+        payload.get("requestId"),
+        metadata.get("turn_id"),
+        metadata.get("turnId"),
+        metadata.get("request_id"),
+        metadata.get("requestId"),
+    )
+
+    if session_id is None:
+        stable_prefix, _, _ = _conversation_lineage(protocol, payload)
+        prefix = [
+            "gateway-session-lineage-v1",
+            protocol,
+            stable_prefix,
+        ]
+        session_id = f"{protocol}:{_sha256(_canonical_json(prefix))}"
+    if turn_id is None:
+        _, latest_user_index, latest_user_record = _conversation_lineage(
+            protocol,
+            payload,
+        )
+        request_lineage = [
+            "gateway-turn-lineage-v1",
+            protocol,
+            latest_user_index,
+            latest_user_record,
+        ]
+        turn_id = f"{protocol}:{_sha256(_canonical_json(request_lineage))}"
+
+    return (
+        _bounded_origin_id("session", session_id),
+        _bounded_origin_id("turn", turn_id),
+    )
 
 
 def _extract_latest_user_turn(messages: list[dict]) -> Optional[str]:
@@ -239,13 +377,24 @@ async def cortex_recall(query: str, budget: int) -> Optional[dict]:
                 "memory_count": len(results),
             }
     except Exception as exc:
-        log.warning("Cortex search failed (non-fatal): %s", exc)
+        log.warning(
+            "Cortex search failed (non-fatal): error_type=%s",
+            type(exc).__name__,
+        )
         return None
 
 
-async def cortex_ingest(content: str, source: str, source_type: str,
-                        priority: int = 2) -> None:
-    """Call POST /api/v1/ingest asynchronously (never blocks)."""
+async def cortex_ingest(
+    content: str,
+    source: str,
+    source_type: str,
+    priority: int = 2,
+    *,
+    idempotency_key: str,
+    session_id: str,
+    request_id: str,
+) -> Optional[dict]:
+    """Wait for Cortex to durably accept an exchange and return its receipt."""
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
@@ -256,34 +405,93 @@ async def cortex_ingest(content: str, source: str, source_type: str,
                     "source": source,
                     "sourceType": source_type,
                     "priority": priority,
+                    "idempotencyKey": idempotency_key,
+                    "sessionId": session_id,
+                    "requestId": request_id,
                 },
             )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("skipped"):
-                log.debug("Cortex ingest skipped (dup of #%s, sim %s)",
-                          data.get("duplicateOf"), data.get("similarity"))
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+
+            if not isinstance(data, dict):
+                log.warning(
+                    "Cortex durable ingest returned an invalid receipt: http_status=%d",
+                    resp.status_code,
+                )
+                return None
+
+            event_id = data.get("eventId")
+            status = data.get("status")
+            replayed = bool(data.get("replayed", False))
+            if not isinstance(event_id, str) or not isinstance(status, str):
+                log.warning(
+                    "Cortex durable ingest returned an incomplete receipt: http_status=%d",
+                    resp.status_code,
+                )
+                return None
+
+            if status == "indexed":
+                log.info(
+                    "Cortex capture indexed: event_id=%s replayed=%s chunks=%d synapses=%d",
+                    event_id,
+                    replayed,
+                    int(data.get("chunksStored", 0)),
+                    int(data.get("synapsesFormed", 0)),
+                )
+            elif status in ("accepted", "processing"):
+                log.info(
+                    "Cortex capture durably accepted; indexing pending: event_id=%s status=%s replayed=%s",
+                    event_id,
+                    status,
+                    replayed,
+                )
+            elif status == "failed":
+                failure = data.get("failure")
+                retryable = bool(
+                    isinstance(failure, dict) and failure.get("retryable", False)
+                )
+                log.warning(
+                    "Cortex capture failed after durable acceptance: event_id=%s retryable=%s replayed=%s",
+                    event_id,
+                    retryable,
+                    replayed,
+                )
+            elif status == "rejected":
+                log.warning(
+                    "Cortex capture rejected: event_id=%s replayed=%s",
+                    event_id,
+                    replayed,
+                )
             else:
-                log.info("Cortex ingest: %d chunks, %d synapses",
-                         data.get("chunksStored", 0),
-                         data.get("synapsesFormed", 0))
+                log.warning(
+                    "Cortex durable ingest returned an unknown lifecycle status: event_id=%s",
+                    event_id,
+                )
+                return None
+            return data
     except Exception as exc:
-        log.warning("Cortex ingest failed (non-fatal): %s", exc)
+        log.warning(
+            "Cortex durable ingest failed before a receipt: error_type=%s",
+            type(exc).__name__,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Request processing
 # ---------------------------------------------------------------------------
 
-# Relevance gate: minimum top-result score to inject recall.
-# Below this, the query is unrelated to anything in memory and injection
-# would just waste tokens.  Tuned from A/B test (search scores, not recall):
-#   "weather in Tokyo" scored 2.22 (correctly blocked)
-#   "reverse a linked list" scored 2.38 (correctly blocked)
-#   "CA3 pattern completion" scored 8.57 (correctly injected)
-#   "Cortex dream cycle" scored 9.02 (correctly injected)
-# Set at 5.0 as the midpoint between noise (~2-3) and signal (~8-11).
-CORTEX_RELEVANCE_THRESHOLD = float(os.getenv("CORTEX_RELEVANCE_THRESHOLD", "5.0"))
+# Relevance gate over Cortex's public normalized [0,1] search score. Invalid
+# configuration fails process startup rather than silently disabling recall.
+CORTEX_RELEVANCE_THRESHOLD = float(os.getenv("CORTEX_RELEVANCE_THRESHOLD", "0.5"))
+if (
+    not math.isfinite(CORTEX_RELEVANCE_THRESHOLD)
+    or CORTEX_RELEVANCE_THRESHOLD < 0
+    or CORTEX_RELEVANCE_THRESHOLD > 1
+):
+    raise ValueError("CORTEX_RELEVANCE_THRESHOLD must be between 0 and 1")
 
 # Minimum query length to even attempt recall.  Very short queries
 # (1-2 words that aren't trivial) are unlikely to produce useful recall.
@@ -306,7 +514,7 @@ async def process_request(messages: list[dict]) -> tuple[list[dict], Optional[st
 
     # Trivial turns: don't re-recall (the context is already loaded)
     if _TRIVIAL_TURN_RE.match(latest_turn):
-        log.debug("Skipping recall for trivial turn: %r", latest_turn[:80])
+        log.debug("Skipping recall for trivial turn")
         return messages, latest_turn
 
     # Too-short queries: skip recall (unlikely to produce useful results)
@@ -325,13 +533,15 @@ async def process_request(messages: list[dict]) -> tuple[list[dict], Optional[st
             inject_at = _find_inject_point(messages)
             modified = list(messages)
             modified.insert(inject_at, {"role": "system", "content": block})
-            log.debug("Reusing cached recall for query %r (%dms since last)",
-                      latest_turn[:60], int(now_ms - last_ts))
+            log.debug(
+                "Reusing cached recall (%dms since last)",
+                int(now_ms - last_ts),
+            )
             return modified, latest_turn
-        log.debug("Throttled but no cached block for query %r", latest_turn[:60])
+        log.debug("Recall throttled but no cached block was available")
         return messages, latest_turn
 
-    # Call Cortex search (CA3-enabled via REST path)
+    # Call the shared Cortex REST search path (ordinary CA3 configuration is off)
     recall_result = await cortex_recall(latest_turn, CORTEX_RECALL_BUDGET)
     if not recall_result:
         return messages, latest_turn
@@ -342,8 +552,11 @@ async def process_request(messages: list[dict]) -> tuple[list[dict], Optional[st
 
     # ── Relevance gate: only inject if the top result is relevant enough ──
     if top_score < CORTEX_RELEVANCE_THRESHOLD:
-        log.info("Skipping recall: top score %.3f < threshold %.3f for %r",
-                 top_score, CORTEX_RELEVANCE_THRESHOLD, latest_turn[:80])
+        log.info(
+            "Skipping recall: top score %.3f < threshold %.3f",
+            top_score,
+            CORTEX_RELEVANCE_THRESHOLD,
+        )
         return messages, latest_turn
 
     if not context or not context.strip():
@@ -363,96 +576,51 @@ async def process_request(messages: list[dict]) -> tuple[list[dict], Optional[st
     modified = list(messages)
     modified.insert(inject_at, {"role": "system", "content": block})
 
-    log.info("Injected recall (%d chars, %d memories, top score %.3f) at pos %d for %r",
-             len(block), mem_count, top_score, inject_at, latest_turn[:80])
+    log.info(
+        "Injected recall (%d chars, %d memories, top score %.3f) at pos %d",
+        len(block),
+        mem_count,
+        top_score,
+        inject_at,
+    )
     return modified, latest_turn
 
 
-async def capture_exchange(latest_turn: str, assistant_content: str) -> None:
-    """POST phase: ingest the exchange (async, never blocks).
-
-    Includes multiple dedup layers:
-    1. Client-side exact-key dedup (same user turn within DEDUP_MS window)
-    2. Client-side semantic dedup: search Cortex for existing memories matching
-       this exchange. If the top result has cosine >= 0.85, skip ingest entirely.
-       This prevents the "same topic, different turn" duplicate pattern where
-       each turn in a long conversation about the same project creates a
-       near-duplicate memory.
-    """
+async def capture_exchange(
+    latest_turn: str,
+    assistant_content: str,
+    session_id: str,
+    turn_id: str,
+) -> Optional[dict]:
+    """Durably submit one exact exchange; retries replay through Cortex."""
     if not latest_turn or not assistant_content:
-        return
-    # Skip trivially short exchanges
-    if len(latest_turn) + len(assistant_content) < CORTEX_CAPTURE_MIN_CHARS:
-        return
+        return None
 
-    # ── Layer 1: Client-side exact dedup ──
-    capture_key = latest_turn[:200]
-    now_ms = time.time() * 1000
-    last_capture_ts = _last_capture_ts.get(capture_key, 0)
-    if CORTEX_CAPTURE_DEDUP_MS > 0 and (now_ms - last_capture_ts) < CORTEX_CAPTURE_DEDUP_MS:
-        log.debug("Skipping capture: same turn captured %dms ago", int(now_ms - last_capture_ts))
-        return
-    _last_capture_ts[capture_key] = now_ms
-
-    # Check for VERIFIED breadcrumb -> elevated priority
+    # Check for VERIFIED breadcrumb -> request elevated priority. Cortex's
+    # central policy remains authoritative for the effective priority.
     priority = 2
     if _VERIFIED_RE.search(latest_turn) or _VERIFIED_RE.search(assistant_content):
         priority = 0
-        log.info("VERIFIED breadcrumb detected -- writing at P%d", priority)
+        log.info("VERIFIED breadcrumb detected: requested_priority=%d", priority)
 
     # Format as a structured exchange for ingest
     content = f"User: {latest_turn}\n\nAssistant: {assistant_content}"
     source = "hermes-gateway"
-    source_type = "verified-api" if priority == 0 else "api"
-
-    # ── Layer 2: Novelty-gated capture ──
-    # Instead of capturing every exchange and relying on the server-side dedup
-    # gate to catch duplicates, we check Cortex first: only capture if this
-    # exchange is genuinely novel (no existing memory matches it).
-    # This prevents the "same topic, different turn" duplicate pattern where
-    # a long working session about Cortex/SimsOnline/etc creates dozens of
-    # near-duplicate memories.
-    # VERIFIED breadcrumbs bypass this check (they're always captured at P0).
-    if priority != 0:  # Only do novelty check for non-VERIFIED captures
-        try:
-            search_resp = await _http_call(
-                "POST",
-                f"{CORTEX_REST_BASE}/api/v1/search",
-                json={"query": latest_turn[:500], "agentId": CORTEX_AGENT_ID, "limit": 1},
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
-            if search_resp.status == 200:
-                search_data = await search_resp.json()
-                results = search_data.get("results", [])
-                if results:
-                    top = results[0]
-                    existing_content = top.get("content", "").lower()
-                    turn_text = latest_turn[:500].lower()
-                    # Use stopword-filtered word overlap to check novelty.
-                    # Only skip if VERY high overlap (>= 75%) -- this means
-                    # we're re-capturing essentially the same topic.
-                    stopwords = {"the", "and", "for", "are", "was", "but", "not", "you",
-                                 "all", "can", "her", "was", "one", "our", "out", "has",
-                                 "have", "from", "they", "this", "that", "with", "will",
-                                 "your", "what", "when", "how", "into", "been", "them",
-                                 "than", "then", "these", "those", "their", "would",
-                                 "could", "should", "about", "which", "there", "here",
-                                 "just", "like", "also", "only", "some", "more", "such",
-                                 "very", "much", "many", "most", "each", "make", "made",
-                                 "does", "done", "were", "where", "while", "after",
-                                 "before", "between", "during", "through", "because"}
-                    turn_words = set(w for w in turn_text.split() if len(w) >= 4 and w not in stopwords and w.isalpha())
-                    existing_words = set(w for w in existing_content.split() if len(w) >= 4 and w not in stopwords and w.isalpha())
-                    if turn_words and existing_words:
-                        overlap = len(turn_words & existing_words) / len(turn_words)
-                        if overlap >= 0.75:
-                            log.debug("Skipping capture: %d%% word overlap with #%s (not novel)",
-                                      int(overlap * 100), top.get("id"))
-                            return
-        except Exception as e:
-            log.debug("Novelty check failed (non-fatal, will capture): %s", e)
-
-    asyncio.create_task(cortex_ingest(content, source, source_type, priority))
+    source_type = "session"
+    idempotency_key = derive_capture_idempotency_key(
+        session_id,
+        turn_id,
+        content,
+    )
+    return await cortex_ingest(
+        content,
+        source,
+        source_type,
+        priority,
+        idempotency_key=idempotency_key,
+        session_id=session_id,
+        request_id=turn_id,
+    )
 
 
 def _extract_assistant_content(response_json: dict) -> str:
@@ -492,8 +660,15 @@ def _extract_latest_user_turn_responses(input_field: Any) -> Optional[str]:
         if item.get("role") == "user" or item.get("type") == "message":
             content = item.get("content", "")
             if isinstance(content, list):
-                parts = [p.get("text", "") for p in content
-                         if isinstance(p, dict) and p.get("type", "").startswith("input_text") or p.get("type") == "text"]
+                parts = [
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict)
+                    and (
+                        p.get("type", "").startswith("input_text")
+                        or p.get("type") == "text"
+                    )
+                ]
                 return " ".join(parts).strip() or None
             return str(content).strip() or None
     return None
@@ -532,7 +707,7 @@ async def process_request_responses(payload: dict) -> tuple[dict, Optional[str]]
         return payload, None
 
     if _TRIVIAL_TURN_RE.match(latest_turn):
-        log.debug("Skipping recall for trivial turn (responses): %r", latest_turn[:80])
+        log.debug("Skipping recall for trivial turn (responses)")
         return payload, latest_turn
 
     if len(latest_turn) < CORTEX_MIN_QUERY_LEN:
@@ -552,9 +727,9 @@ async def process_request_responses(payload: dict) -> tuple[dict, Optional[str]]
                 modified.insert(inject_at, {"role": "system", "content": block})
                 new_payload = dict(payload)
                 new_payload["input"] = modified
-                log.debug("Reusing cached recall for query %r (responses)", latest_turn[:60])
+                log.debug("Reusing cached recall (responses)")
                 return new_payload, latest_turn
-        log.debug("Throttled but no cached block (responses) for %r", latest_turn[:60])
+        log.debug("Recall throttled but no cached block was available (responses)")
         return payload, latest_turn
 
     recall_result = await cortex_recall(latest_turn, CORTEX_RECALL_BUDGET)
@@ -567,8 +742,11 @@ async def process_request_responses(payload: dict) -> tuple[dict, Optional[str]]
 
     # Relevance gate
     if top_score < CORTEX_RELEVANCE_THRESHOLD:
-        log.info("Skipping recall (responses): top score %.3f < threshold %.3f for %r",
-                 top_score, CORTEX_RELEVANCE_THRESHOLD, latest_turn[:80])
+        log.info(
+            "Skipping recall (responses): top score %.3f < threshold %.3f",
+            top_score,
+            CORTEX_RELEVANCE_THRESHOLD,
+        )
         return payload, latest_turn
 
     if not context or not context.strip():
@@ -588,8 +766,13 @@ async def process_request_responses(payload: dict) -> tuple[dict, Optional[str]]
         modified.insert(inject_at, {"role": "system", "content": block})
         new_payload = dict(payload)
         new_payload["input"] = modified
-        log.info("Injected recall (%d chars, %d mem, top %.3f) at pos %d (responses) for %r",
-                 len(block), mem_count, top_score, inject_at, latest_turn[:80])
+        log.info(
+            "Injected recall (%d chars, %d mem, top %.3f) at pos %d (responses)",
+            len(block),
+            mem_count,
+            top_score,
+            inject_at,
+        )
         return new_payload, latest_turn
     return payload, latest_turn
 
@@ -614,6 +797,232 @@ def _extract_responses_content(response_json: dict) -> str:
         return " ".join(p for p in parts if p)
     except Exception:
         return ""
+
+
+def _sse_event_end(buffer: bytearray, *, final: bool) -> Optional[int]:
+    """Find one SSE blank-line boundary without splitting a pending CRLF."""
+    previous_was_line_end = False
+    index = 0
+    while index < len(buffer):
+        current = buffer[index]
+        line_end_size = 0
+        if current == 0x0A:
+            line_end_size = 1
+        elif current == 0x0D:
+            if index + 1 >= len(buffer):
+                if not final:
+                    return None
+                line_end_size = 1
+            else:
+                line_end_size = 2 if buffer[index + 1] == 0x0A else 1
+
+        if line_end_size == 0:
+            previous_was_line_end = False
+            index += 1
+            continue
+        index += line_end_size
+        if previous_was_line_end:
+            return index
+        previous_was_line_end = True
+    return None
+
+
+class _SseEventBuffer:
+    """Buffer raw SSE bytes until complete events can be decoded safely."""
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        self._buffer.extend(chunk)
+        events: list[bytes] = []
+        while True:
+            end = _sse_event_end(self._buffer, final=False)
+            if end is None:
+                break
+            events.append(bytes(self._buffer[:end]))
+            del self._buffer[:end]
+        return events
+
+    def finish(self) -> list[bytes]:
+        events: list[bytes] = []
+        while self._buffer:
+            end = _sse_event_end(self._buffer, final=True)
+            if end is None:
+                events.append(bytes(self._buffer))
+                self._buffer.clear()
+                break
+            events.append(bytes(self._buffer[:end]))
+            del self._buffer[:end]
+        return events
+
+
+def _sse_data_payload(event: bytes) -> Optional[str]:
+    """Decode one complete SSE event and join its data fields per the spec."""
+    try:
+        text = event.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    text = text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    data_lines: list[str] = []
+    found_data = False
+    for line in text.split("\n"):
+        if not line or line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if field != "data":
+            continue
+        found_data = True
+        if separator and value.startswith(" "):
+            value = value[1:]
+        data_lines.append(value)
+    return "\n".join(data_lines) if found_data else None
+
+
+def _chat_delta_content(data_payload: Optional[str]) -> str:
+    """Extract one assistant text delta from a Chat Completions SSE event."""
+    if data_payload is None or data_payload.strip() == "[DONE]":
+        return ""
+    try:
+        event = json.loads(data_payload)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    choices = event.get("choices", []) if isinstance(event, dict) else []
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    delta = choices[0].get("delta", {})
+    if not isinstance(delta, dict):
+        return ""
+    content = delta.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    return ""
+
+
+async def _iter_sse_events(
+    chunks: AsyncIterable[bytes],
+) -> AsyncIterator[bytes]:
+    """Yield complete raw events across arbitrary byte and UTF-8 splits."""
+    event_buffer = _SseEventBuffer()
+    async for chunk in chunks:
+        if not chunk:
+            continue
+        for event in event_buffer.feed(bytes(chunk)):
+            yield event
+    for event in event_buffer.finish():
+        yield event
+
+
+async def _forward_chat_sse(
+    chunks: AsyncIterable[bytes],
+    write: Callable[[bytes], Awaitable[Any]],
+    latest_turn: Optional[str],
+    session_id: str,
+    turn_id: str,
+) -> Optional[dict]:
+    """Pass through chat SSE while gating terminal acknowledgement on capture."""
+    accumulated_content: list[str] = []
+    pending_after_terminal: list[tuple[bool, bytes]] = []
+    terminal_seen = False
+
+    async for event in _iter_sse_events(chunks):
+        data_payload = _sse_data_payload(event)
+        is_terminal = (
+            data_payload is not None and data_payload.strip() == "[DONE]"
+        )
+        if is_terminal:
+            terminal_seen = True
+            pending_after_terminal.append((True, event))
+            break
+
+        content = _chat_delta_content(data_payload)
+        if content:
+            accumulated_content.append(content)
+        if terminal_seen:
+            pending_after_terminal.append((False, event))
+        else:
+            await write(event)
+
+    capture_required = bool(terminal_seen and latest_turn and accumulated_content)
+    receipt = None
+    if capture_required:
+        receipt = await capture_exchange(
+            latest_turn,
+            "".join(accumulated_content),
+            session_id,
+            turn_id,
+        )
+
+    for is_terminal, event in pending_after_terminal:
+        if not is_terminal or not capture_required or receipt is not None:
+            await write(event)
+    if terminal_seen and capture_required and receipt is None:
+        log.warning(
+            "Suppressing chat completion marker without a durable capture receipt"
+        )
+    elif not terminal_seen and accumulated_content:
+        log.warning("Upstream chat stream ended without a completion marker")
+    return receipt
+
+
+def _responses_stream_event(event_type: str, **fields: Any) -> bytes:
+    payload = {"type": event_type, **fields}
+    return f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+
+
+async def _forward_responses_sse(
+    chunks: AsyncIterable[bytes],
+    write: Callable[[bytes], Awaitable[Any]],
+    latest_turn: Optional[str],
+    session_id: str,
+    turn_id: str,
+) -> Optional[dict]:
+    """Translate chat SSE to Responses SSE and gate its terminal events."""
+    accumulated_content: list[str] = []
+    terminal_seen = False
+
+    async for event in _iter_sse_events(chunks):
+        data_payload = _sse_data_payload(event)
+        if data_payload is not None and data_payload.strip() == "[DONE]":
+            terminal_seen = True
+            break
+        content = _chat_delta_content(data_payload)
+        if not content:
+            continue
+        accumulated_content.append(content)
+        await write(
+            _responses_stream_event("response.output_text.delta", delta=content)
+        )
+
+    capture_required = bool(terminal_seen and latest_turn and accumulated_content)
+    receipt = None
+    if capture_required:
+        receipt = await capture_exchange(
+            latest_turn,
+            "".join(accumulated_content),
+            session_id,
+            turn_id,
+        )
+
+    if not terminal_seen:
+        log.warning("Upstream Responses stream ended without a completion marker")
+    elif not capture_required or receipt is not None:
+        await write(_responses_stream_event("response.output_text.done"))
+        await write(_responses_stream_event("response.done"))
+    else:
+        log.warning(
+            "Suppressing Responses completion marker without a durable capture receipt"
+        )
+    return receipt
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +1058,11 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
+    capture_session_id, capture_turn_id = derive_capture_lineage(
+        "chat",
+        payload,
+        request.headers,
+    )
     messages = payload.get("messages", [])
     stream = payload.get("stream", False)
 
@@ -659,7 +1073,12 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
             msg["role"] = "system"
     payload["messages"] = modified_messages
     payload["model"] = "gemma4-26b:latest"
-    log.info(f"Sending CC payload: {json.dumps(payload)[:500]}...")
+    log.info(
+        "Forwarding chat completion: keys=%s messages=%d stream=%s",
+        sorted(payload.keys()),
+        len(modified_messages),
+        stream,
+    )
 
     # ── FORWARD to real upstream ──
     upstream_url = f"{CORTEX_UPSTREAM}/chat/completions"
@@ -680,7 +1099,7 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
         ) as upstream_resp:
             if upstream_resp.status_code >= 400:
                 error_body = await upstream_resp.aread()
-                log.error(f"Upstream returned {upstream_resp.status_code}: {error_body}")
+                log.error("Upstream returned status=%d", upstream_resp.status_code)
                 return web.Response(status=upstream_resp.status_code, body=error_body)
 
             response = web.StreamResponse(
@@ -692,29 +1111,13 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
             )
             await response.prepare(request)
 
-            accumulated_content = []
-            async for chunk in upstream_resp.aiter_bytes():
-                await response.write(chunk)
-                # Parse SSE lines to capture content deltas
-                try:
-                    text = chunk.decode("utf-8", errors="replace")
-                    for line in text.split("\n"):
-                        if line.startswith("data: ") and line != "data: [DONE]":
-                            data = line[6:]
-                            try:
-                                obj = json.loads(data)
-                                delta = obj.get("choices", [{}])[0].get("delta", {})
-                                c = delta.get("content", "")
-                                if c:
-                                    accumulated_content.append(c)
-                            except json.JSONDecodeError:
-                                pass
-                except Exception:
-                    pass
-
-            # ── POST: capture the exchange (async, non-blocking) ──
-            if latest_turn and accumulated_content:
-                await capture_exchange(latest_turn, "".join(accumulated_content))
+            await _forward_chat_sse(
+                upstream_resp.aiter_bytes(),
+                response.write,
+                latest_turn,
+                capture_session_id,
+                capture_turn_id,
+            )
 
             return response
     else:
@@ -730,9 +1133,17 @@ async def proxy_chat_completions(request: web.Request) -> web.StreamResponse:
             try:
                 resp_json = upstream_resp.json()
                 assistant_content = _extract_assistant_content(resp_json)
-                await capture_exchange(latest_turn, assistant_content)
+                await capture_exchange(
+                    latest_turn,
+                    assistant_content,
+                    capture_session_id,
+                    capture_turn_id,
+                )
             except Exception as exc:
-                log.debug("Capture skipped (parse error): %s", exc)
+                log.debug(
+                    "Capture skipped after response parsing failure: error_type=%s",
+                    type(exc).__name__,
+                )
 
         # Return upstream response to client
         return web.Response(
@@ -754,6 +1165,11 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
+    capture_session_id, capture_turn_id = derive_capture_lineage(
+        "responses",
+        payload,
+        request.headers,
+    )
     stream = payload.get("stream", False)
 
     # ── PRE: deterministic recall injection (Responses API) ──
@@ -773,7 +1189,7 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
     # Pass along tools if they exist
     if "tools" in modified_payload:
         chat_payload["tools"] = modified_payload["tools"]
-    
+
     input_list = modified_payload.get("input", [])
     if isinstance(input_list, str):
         chat_payload["messages"].append({"role": "user", "content": input_list})
@@ -787,7 +1203,7 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
                 parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
                 content = "\n".join(parts)
             chat_payload["messages"].append({"role": role, "content": content})
-            
+
     log.info(f"Translated payload keys: {list(chat_payload.keys())}, messages count: {len(chat_payload['messages'])}")
 
     client = await get_upstream_client()
@@ -800,7 +1216,7 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
         ) as upstream_resp:
             if upstream_resp.status_code >= 400:
                 error_body = await upstream_resp.aread()
-                log.error(f"Upstream returned {upstream_resp.status_code}: {error_body}")
+                log.error("Upstream returned status=%d", upstream_resp.status_code)
                 return web.Response(status=upstream_resp.status_code, body=error_body)
 
             response = web.StreamResponse(
@@ -812,34 +1228,13 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
             )
             await response.prepare(request)
 
-            accumulated_content = []
-            async for chunk in upstream_resp.aiter_bytes():
-                try:
-                    text = chunk.decode("utf-8", errors="replace")
-                    for line in text.split("\n"):
-                        if line.startswith("data: ") and line != "data: [DONE]":
-                            data_str = line[6:]
-                            try:
-                                obj = json.loads(data_str)
-                                delta = obj.get("choices", [{}])[0].get("delta", {})
-                                c = delta.get("content", "")
-                                if c:
-                                    accumulated_content.append(c)
-                                    # Translate to Responses API chunk
-                                    resp_chunk = {"type": "response.output_text.delta", "delta": c}
-                                    await response.write(f"data: {json.dumps(resp_chunk)}\n\n".encode("utf-8"))
-                            except json.JSONDecodeError:
-                                pass
-                except Exception:
-                    pass
-            
-            # Send completion markers
-            await response.write(b"data: {\"type\": \"response.output_text.done\"}\n\n")
-            await response.write(b"data: {\"type\": \"response.done\"}\n\n")
-
-            # ── POST: capture ──
-            if latest_turn and accumulated_content:
-                await capture_exchange(latest_turn, "".join(accumulated_content))
+            await _forward_responses_sse(
+                upstream_resp.aiter_bytes(),
+                response.write,
+                latest_turn,
+                capture_session_id,
+                capture_turn_id,
+            )
 
             return response
     else:
@@ -849,7 +1244,7 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
             headers=headers,
         )
         if upstream_resp.status_code >= 400:
-            log.error(f"Upstream returned {upstream_resp.status_code}: {upstream_resp.content}")
+            log.error("Upstream returned status=%d", upstream_resp.status_code)
 
         resp_json = {}
         try:
@@ -871,9 +1266,17 @@ async def proxy_responses(request: web.Request) -> web.StreamResponse:
         # ── POST: capture ──
         if latest_turn and assistant_content:
             try:
-                await capture_exchange(latest_turn, assistant_content)
+                await capture_exchange(
+                    latest_turn,
+                    assistant_content,
+                    capture_session_id,
+                    capture_turn_id,
+                )
             except Exception as exc:
-                log.debug("Capture skipped (responses parse error): %s", exc)
+                log.debug(
+                    "Capture skipped after Responses parsing failure: error_type=%s",
+                    type(exc).__name__,
+                )
 
         return web.json_response(responses_payload, status=upstream_resp.status_code)
 
@@ -916,8 +1319,6 @@ async def health(request: web.Request) -> web.Response:
         "recall_throttle_ms": CORTEX_RECALL_THROTTLE_MS,
         "relevance_threshold": CORTEX_RELEVANCE_THRESHOLD,
         "min_query_len": CORTEX_MIN_QUERY_LEN,
-        "capture_min_chars": CORTEX_CAPTURE_MIN_CHARS,
-        "capture_dedup_ms": CORTEX_CAPTURE_DEDUP_MS,
     }
     # Quick Cortex REST ping
     try:

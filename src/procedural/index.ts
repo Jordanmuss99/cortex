@@ -10,7 +10,7 @@
  */
 
 import { db, schema } from "../db/index.js";
-import { eq, sql, and, ilike, or } from "drizzle-orm";
+import { eq, sql, and, ilike, or, inArray } from "drizzle-orm";
 import { embedTexts, embedQuery } from "../ingestion/embeddings.js";
 import type {
   ProceduralType,
@@ -21,9 +21,29 @@ import type {
 
 export type { ProceduralType, ProficiencyLevel, ProceduralMemory, ProceduralMatch };
 
+const MAX_POSTGRES_INTEGER = 2_147_483_647;
+
+export class ProceduralMemoryNotFoundError extends Error {
+  readonly code = "procedural_memory_not_found";
+
+  constructor(readonly proceduralId: number) {
+    super(`Procedural memory #${proceduralId} not found`);
+    this.name = "ProceduralMemoryNotFoundError";
+  }
+}
+
+export class InvalidSourceMemoryReferencesError extends Error {
+  readonly code = "invalid_source_memory_references";
+
+  constructor(readonly requestedCount: number) {
+    super("One or more source memory references are invalid");
+    this.name = "InvalidSourceMemoryReferencesError";
+  }
+}
+
 // ─── Store ──────────────────────────────────────────────
 
-interface CreateProceduralInput {
+export interface CreateProceduralInput {
   agentId: number;
   name: string;
   description: string;
@@ -31,7 +51,47 @@ interface CreateProceduralInput {
   triggerContext: string;
   steps: string[];
   domainTags: string[];
-  sourceMemoryIds?: number[];
+  sourceMemoryIds?: readonly number[];
+}
+
+export function normalizeSourceMemoryIds(
+  ids: readonly number[] | undefined
+): number[] {
+  if (ids === undefined) return [];
+  if (!Array.isArray(ids)) throw new InvalidSourceMemoryReferencesError(0);
+
+  const unique = [];
+  const seen = new Set<number>();
+  for (const id of ids) {
+    if (!Number.isSafeInteger(id) || id <= 0 || id > MAX_POSTGRES_INTEGER) {
+      throw new InvalidSourceMemoryReferencesError(ids.length);
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      unique.push(id);
+    }
+  }
+  if (unique.length > 100) {
+    throw new InvalidSourceMemoryReferencesError(unique.length);
+  }
+  return unique;
+}
+
+export async function assertSourceMemoriesOwnedByAgent(
+  agentId: number,
+  ids: readonly number[]
+): Promise<void> {
+  if (ids.length === 0) return;
+  const owned = await db
+    .select({ id: schema.memoryNodes.id })
+    .from(schema.memoryNodes)
+    .where(and(
+      eq(schema.memoryNodes.agentId, agentId),
+      inArray(schema.memoryNodes.id, [...ids])
+    ));
+  if (owned.length !== ids.length) {
+    throw new InvalidSourceMemoryReferencesError(ids.length);
+  }
 }
 
 /**
@@ -40,35 +100,55 @@ interface CreateProceduralInput {
 export async function storeProcedural(
   input: CreateProceduralInput
 ): Promise<number> {
+  const sourceMemoryIds = normalizeSourceMemoryIds(input.sourceMemoryIds);
+  await assertSourceMemoriesOwnedByAgent(input.agentId, sourceMemoryIds);
+
   // Embed the combined text for semantic retrieval
   const textForEmbedding = `${input.name}. ${input.triggerContext}. ${input.description}. ${input.steps.join(". ")}`;
   const [embedding] = await embedTexts([textForEmbedding]);
 
-  const [inserted] = await db
-    .insert(schema.proceduralMemories)
-    .values({
-      agentId: input.agentId,
-      name: input.name,
-      description: input.description,
-      proceduralType: input.proceduralType,
-      triggerContext: input.triggerContext,
-      steps: input.steps,
-      domainTags: input.domainTags,
-      sourceMemoryIds: input.sourceMemoryIds || [],
-      embedding,
-      proficiency: "novice",
-      executionCount: 0,
-      successCount: 0,
-      successRate: 0,
-      version: 1,
-    })
-    .returning({ id: schema.proceduralMemories.id });
+  const insertedId = await db.transaction(async (transaction) => {
+    if (sourceMemoryIds.length > 0) {
+      const owned = await transaction
+        .select({ id: schema.memoryNodes.id })
+        .from(schema.memoryNodes)
+        .where(and(
+          eq(schema.memoryNodes.agentId, input.agentId),
+          inArray(schema.memoryNodes.id, sourceMemoryIds)
+        ))
+        .for("share");
+      if (owned.length !== sourceMemoryIds.length) {
+        throw new InvalidSourceMemoryReferencesError(sourceMemoryIds.length);
+      }
+    }
+
+    const [inserted] = await transaction
+      .insert(schema.proceduralMemories)
+      .values({
+        agentId: input.agentId,
+        name: input.name,
+        description: input.description,
+        proceduralType: input.proceduralType,
+        triggerContext: input.triggerContext,
+        steps: input.steps,
+        domainTags: input.domainTags,
+        sourceMemoryIds,
+        embedding,
+        proficiency: "novice",
+        executionCount: 0,
+        successCount: 0,
+        successRate: 0,
+        version: 1,
+      })
+      .returning({ id: schema.proceduralMemories.id });
+    return inserted.id;
+  });
 
   console.error(
-    `[procedural] Stored: "${input.name}" (${input.proceduralType}) → #${inserted.id}`
+    `[procedural] Stored: "${input.name}" (${input.proceduralType}) → #${insertedId}`
   );
 
-  return inserted.id;
+  return insertedId;
 }
 
 // ─── Retrieve ───────────────────────────────────────────
@@ -102,7 +182,7 @@ export async function retrieveProcedural(
     ORDER BY
       trigger_match DESC,
       cosine_sim DESC
-    LIMIT ${limit}
+    LIMIT ${Math.min(Math.max(limit * 3, limit), 60)}
   `);
 
   return (
@@ -127,9 +207,7 @@ export async function retrieveProcedural(
     const matchType =
       row.trigger_match > 0
         ? "trigger"
-        : row.cosine_sim > 0.7
-        ? "semantic"
-        : "domain";
+        : "semantic";
 
     return {
       memory: {
@@ -152,9 +230,10 @@ export async function retrieveProcedural(
         row.trigger_match > 0
           ? 1.0
           : Number(row.cosine_sim),
-      matchType: matchType as "trigger" | "domain" | "semantic",
+      matchType: matchType as "trigger" | "semantic",
     };
-  });
+  }).filter((match) => match.matchType === "trigger" || match.relevanceScore >= 0.35)
+    .slice(0, limit);
 }
 
 // ─── Execute (Record Outcome) ───────────────────────────
@@ -164,27 +243,24 @@ export async function retrieveProcedural(
  * This is how skills improve: repeated execution with feedback.
  */
 export async function recordExecution(
+  agentId: number,
   proceduralId: number,
   success: boolean
 ): Promise<{ proficiency: ProficiencyLevel; successRate: number }> {
-  // Increment counts
-  await db.execute(sql`
+  // Increment and fetch in one statement so nonexistent/cross-agent IDs can
+  // never be reported as a successful execution.
+  const updated = await db.execute(sql`
     UPDATE procedural_memories
     SET execution_count = execution_count + 1,
         success_count = success_count + ${success ? 1 : 0},
         success_rate = (success_count + ${success ? 1 : 0})::real / (execution_count + 1)::real,
         last_executed_at = NOW(),
         updated_at = NOW()
-    WHERE id = ${proceduralId}
+    WHERE id = ${proceduralId} AND agent_id = ${agentId}
+    RETURNING execution_count, success_count, success_rate, proficiency
   `);
 
-  // Check if proficiency should be upgraded
-  const [current] = (
-    await db.execute(sql`
-      SELECT execution_count, success_count, success_rate, proficiency
-      FROM procedural_memories WHERE id = ${proceduralId}
-    `)
-  ).rows as Array<{
+  const [current] = updated.rows as Array<{
     execution_count: number;
     success_count: number;
     success_rate: number;
@@ -192,7 +268,7 @@ export async function recordExecution(
   }>;
 
   if (!current) {
-    return { proficiency: "novice", successRate: 0 };
+    throw new ProceduralMemoryNotFoundError(proceduralId);
   }
 
   // Proficiency advancement rules
@@ -218,7 +294,7 @@ export async function recordExecution(
     await db.execute(sql`
       UPDATE procedural_memories
       SET proficiency = ${newProficiency}
-      WHERE id = ${proceduralId}
+      WHERE id = ${proceduralId} AND agent_id = ${agentId}
     `);
     console.error(
       `[procedural] #${proceduralId} proficiency: ${current.proficiency} → ${newProficiency}`
@@ -235,6 +311,7 @@ export async function recordExecution(
  * Increments version and re-embeds.
  */
 export async function refineProcedural(
+  agentId: number,
   proceduralId: number,
   updates: {
     description?: string;
@@ -247,7 +324,7 @@ export async function refineProcedural(
   const [current] = (
     await db.execute(sql`
       SELECT name, description, trigger_context, steps, domain_tags, version
-      FROM procedural_memories WHERE id = ${proceduralId}
+      FROM procedural_memories WHERE id = ${proceduralId} AND agent_id = ${agentId}
     `)
   ).rows as Array<{
     name: string;
@@ -258,7 +335,7 @@ export async function refineProcedural(
     version: number;
   }>;
 
-  if (!current) throw new Error(`Procedural memory #${proceduralId} not found`);
+  if (!current) throw new ProceduralMemoryNotFoundError(proceduralId);
 
   const newDesc = updates.description || current.description;
   const newSteps = updates.steps || current.steps;
@@ -288,7 +365,7 @@ export async function refineProcedural(
         embedding = ${`[${embedding.join(",")}]`}::vector,
         version = ${newVersion},
         updated_at = NOW()
-    WHERE id = ${proceduralId}
+    WHERE id = ${proceduralId} AND agent_id = ${agentId}
   `);
 
   console.error(`[procedural] #${proceduralId} refined → v${newVersion}`);

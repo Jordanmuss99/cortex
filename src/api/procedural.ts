@@ -5,6 +5,8 @@ import {
   retrieveProcedural,
   recordExecution,
   refineProcedural,
+  InvalidSourceMemoryReferencesError,
+  ProceduralMemoryNotFoundError,
 } from "../procedural/index.js";
 import { eq, sql } from "drizzle-orm";
 
@@ -23,7 +25,7 @@ router.get("/", async (req: Request, res: Response) => {
       return;
     }
 
-    const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.externalId, agentId));
+    const [agent] = await db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.externalId, agentId));
     if (!agent) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
     const results = await db.execute(sql`
@@ -72,7 +74,7 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.externalId, agentId));
+    const [agent] = await db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.externalId, agentId));
     if (!agent) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
     const id = await storeProcedural({
@@ -82,6 +84,13 @@ router.post("/", async (req: Request, res: Response) => {
 
     res.json({ id, name, proceduralType });
   } catch (err) {
+    if (err instanceof InvalidSourceMemoryReferencesError) {
+      res.status(400).json({
+        error: "Invalid source memory references",
+        code: err.code,
+      });
+      return;
+    }
     console.error("[procedural] Error:", err);
     res.status(500).json({ error: "Failed to store procedural memory" });
   }
@@ -100,7 +109,7 @@ router.post("/retrieve", async (req: Request, res: Response) => {
       return;
     }
 
-    const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.externalId, agentId));
+    const [agent] = await db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.externalId, agentId));
     if (!agent) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
     const results = await retrieveProcedural(agent.id, taskContext, limit);
@@ -118,16 +127,23 @@ router.post("/retrieve", async (req: Request, res: Response) => {
 router.post("/:id/execute", async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string);
-    const { success } = req.body;
+    const { agentId, success } = req.body;
 
-    if (typeof success !== "boolean") {
-      res.status(400).json({ error: "success (boolean) required" });
+    if (!agentId || typeof success !== "boolean") {
+      res.status(400).json({ error: "agentId and success (boolean) required" });
       return;
     }
 
-    const result = await recordExecution(id, success);
+    const [agent] = await db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.externalId, agentId));
+    if (!agent) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    const result = await recordExecution(agent.id, id, success);
     res.json({ proceduralId: id, ...result });
   } catch (err) {
+    if (err instanceof ProceduralMemoryNotFoundError) {
+      res.status(404).json({ error: "Procedural memory not found", code: err.code });
+      return;
+    }
     console.error("[procedural] Error:", err);
     res.status(500).json({ error: "Failed to record execution" });
   }
@@ -140,11 +156,27 @@ router.post("/:id/execute", async (req: Request, res: Response) => {
 router.patch("/:id", async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string);
-    const { description, steps, triggerContext, domainTags } = req.body;
+    const { agentId, description, steps, triggerContext, domainTags } = req.body;
 
-    const newVersion = await refineProcedural(id, { description, steps, triggerContext, domainTags });
+    if (!agentId) {
+      res.status(400).json({ error: "agentId required" });
+      return;
+    }
+    if ([description, steps, triggerContext, domainTags].every((value) => value === undefined || value === null)) {
+      res.status(400).json({ error: "At least one refinement field is required" });
+      return;
+    }
+
+    const [agent] = await db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.externalId, agentId));
+    if (!agent) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    const newVersion = await refineProcedural(agent.id, id, { description, steps, triggerContext, domainTags });
     res.json({ proceduralId: id, version: newVersion });
   } catch (err) {
+    if (err instanceof ProceduralMemoryNotFoundError) {
+      res.status(404).json({ error: "Procedural memory not found", code: err.code });
+      return;
+    }
     console.error("[procedural] Error:", err);
     res.status(500).json({ error: "Failed to refine procedural memory" });
   }

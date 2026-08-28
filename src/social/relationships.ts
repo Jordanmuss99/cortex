@@ -134,9 +134,10 @@ export async function resolveOpenItem(agentId: number, personName: string, itemI
   if (!rel) throw new Error(`Relationship not found: ${personName}`);
 
   const items = (rel.openItems as Array<{ text: string; done: boolean; addedAt: string }>) || [];
-  if (itemIndex >= 0 && itemIndex < items.length) {
-    items[itemIndex].done = true;
+  if (itemIndex < 0 || itemIndex >= items.length) {
+    throw new RangeError(`Open item index ${itemIndex} is out of range for ${personName}`);
   }
+  items[itemIndex].done = true;
 
   await db
     .update(schema.relationshipGraph)

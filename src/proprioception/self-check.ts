@@ -294,29 +294,45 @@ async function checkCognitiveIntegrity(agentId: number): Promise<{
 }
 
 export async function runSelfCheck(agentId: number, verbose = false): Promise<DiagnosticResult> {
+  // Headless mode (Docker/CI): skip OpenClaw file-based checks that don't
+  // exist outside a desktop install. The cognitive-integrity checks (orphans,
+  // synaptic collapse, learning stall) still run -- they're pure DB. Without
+  // this guard, containerised deployments always report "degraded" because
+  // ~/.openclaw/skills, cron/jobs.json, and openclaw.json don't exist.
+  const HEADLESS = process.env.CORTEX_HEADLESS === "true";
+
   const [skillsStatus, cronStatus, channelsStatus, drift, cognitiveIntegrity] = await Promise.all([
-    checkSkills(),
-    checkCronJobs(),
-    checkChannels(),
+    HEADLESS
+      ? Promise.resolve({} as Record<string, { exists: boolean; valid: boolean }>)
+      : checkSkills(),
+    HEADLESS
+      ? Promise.resolve({ total: 0, enabled: 0, overdue: [], failed: [], lastChecked: new Date().toISOString() })
+      : checkCronJobs(),
+    HEADLESS
+      ? Promise.resolve({} as Record<string, { enabled: boolean; configured: boolean }>)
+      : checkChannels(),
     checkDrift(agentId),
     checkCognitiveIntegrity(agentId),
   ]);
 
   const alerts: string[] = [];
 
-  // Evaluate skills
-  for (const [skill, status] of Object.entries(skillsStatus)) {
-    if (!status.exists) alerts.push(`Skill "${skill}" SKILL.md missing`);
-    else if (!status.valid) alerts.push(`Skill "${skill}" SKILL.md invalid format`);
-  }
+  // OpenClaw checks are skipped in headless mode -- don't emit alerts for them
+  if (!HEADLESS) {
+    // Evaluate skills
+    for (const [skill, status] of Object.entries(skillsStatus)) {
+      if (!status.exists) alerts.push(`Skill "${skill}" SKILL.md missing`);
+      else if (!status.valid) alerts.push(`Skill "${skill}" SKILL.md invalid format`);
+    }
 
-  // Evaluate cron
-  if (cronStatus.failed.length > 0) alerts.push(`Failed cron jobs: ${cronStatus.failed.join(", ")}`);
-  if (cronStatus.overdue.length > 0) alerts.push(`Overdue cron jobs: ${cronStatus.overdue.join(", ")}`);
+    // Evaluate cron
+    if (cronStatus.failed.length > 0) alerts.push(`Failed cron jobs: ${cronStatus.failed.join(", ")}`);
+    if (cronStatus.overdue.length > 0) alerts.push(`Overdue cron jobs: ${cronStatus.overdue.join(", ")}`);
 
-  // Evaluate channels
-  for (const [name, status] of Object.entries(channelsStatus)) {
-    if (status.enabled && !status.configured) alerts.push(`Channel "${name}" enabled but not configured`);
+    // Evaluate channels
+    for (const [name, status] of Object.entries(channelsStatus)) {
+      if (status.enabled && !status.configured) alerts.push(`Channel "${name}" enabled but not configured`);
+    }
   }
 
   // Evaluate drift

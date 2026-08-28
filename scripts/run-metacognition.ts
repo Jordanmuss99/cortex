@@ -32,7 +32,7 @@ async function main() {
   await initDatabase();
 
   const [agent] = await db
-    .select()
+    .select({ id: schema.agents.id })
     .from(schema.agents)
     .where(eq(schema.agents.externalId, agentExt));
   if (!agent) {

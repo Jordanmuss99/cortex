@@ -29,6 +29,7 @@ const SPARSE_WEIGHT = 0.4;
 // Novelty thresholds
 const NOVEL_HIGH = 0.7; // Highly novel: boost resonance 60%
 const NOVEL_LOW = 0.3; // Redundant: reduce resonance 40%
+const POSSIBLE_UPDATE_SIMILARITY = 0.85;
 
 /**
  * Compute novelty of an incoming memory by comparing what arrived
@@ -44,9 +45,11 @@ export async function computeNovelty(
   agentId: number,
   denseEmbedding: number[],
   sparseCode: SparseCode,
-  basePriority: number
+  basePriority: number,
+  asOf: Date = new Date()
 ): Promise<NoveltyResult> {
   const embeddingStr = `[${denseEmbedding.join(",")}]`;
+  const asOfIso = asOf.toISOString();
 
   // Find top-5 most similar memories across ALL time (not just 24h)
   // This is the full network prediction, not just recency-biased
@@ -58,8 +61,14 @@ export async function computeNovelty(
     FROM memory_nodes
     WHERE agent_id = ${agentId}
       AND status = 'active'
+      AND (valid_from IS NULL OR valid_from <= ${asOfIso})
+      AND (valid_until IS NULL OR valid_until > ${asOfIso})
+      AND (
+        derivation_expires_at IS NULL
+        OR derivation_expires_at > ${asOfIso}
+      )
       AND embedding IS NOT NULL
-    ORDER BY embedding <=> ${embeddingStr}::vector ASC
+    ORDER BY embedding <=> ${embeddingStr}::vector ASC, id ASC
     LIMIT 5
   `);
 
@@ -73,10 +82,11 @@ export async function computeNovelty(
   if (neighbors.length === 0) {
     return {
       noveltyScore: 0.8,
-      resonanceScore: BASE_RESONANCE * 1.3,
+      resonanceScore: BASE_RESONANCE,
       adjustedPriority: basePriority, // don't promote priority from novelty
       predictedSimilarity: 0,
       sparseMismatch: 1.0,
+      possibleUpdateIds: [],
     };
   }
 
@@ -150,25 +160,10 @@ export async function computeNovelty(
 
   noveltyScore = Math.min(Math.max(noveltyScore, 0), 1);
 
-  // ── Modulate resonance and priority ──
-  // Novelty boosts RESONANCE (transient salience that decays over time), not
-  // PRIORITY (which is a permanent structural slot). The old code promoted
-  // novel content one priority tier (P2 -> P1) at ingest and nothing ever
-  // demoted it back, causing 52% of the corpus to accumulate at P0/P1.
-  // Now: novelty only affects resonance. The dream cycle's priority
-  // reconciliation step handles demotion based on sustained access signals.
-  let resonanceScore = BASE_RESONANCE;
+  // CA1 is diagnostic only. Novelty is persisted for inspection and
+  // possible-update hints, but it cannot mutate storage priority or resonance.
+  const resonanceScore = BASE_RESONANCE;
   const adjustedPriority = basePriority; // never promote priority from novelty
-
-  if (noveltyScore > NOVEL_HIGH) {
-    // Highly novel: boost resonance (not priority). This is transient --
-    // the dream cycle will decay it if the memory isn't accessed.
-    resonanceScore = BASE_RESONANCE * 1.6;
-  } else if (noveltyScore <= NOVEL_LOW) {
-    // Redundant/expected: reduce resonance
-    resonanceScore = BASE_RESONANCE * 0.6;
-  }
-  // Normal range (0.3 - 0.7): use base resonance
 
   return {
     noveltyScore,
@@ -176,5 +171,10 @@ export async function computeNovelty(
     adjustedPriority,
     predictedSimilarity: cosineSim,
     sparseMismatch,
+    possibleUpdateIds: neighbors
+      .filter(
+        (neighbor) => Number(neighbor.similarity) >= POSSIBLE_UPDATE_SIMILARITY
+      )
+      .map((neighbor) => Number(neighbor.id)),
   };
 }

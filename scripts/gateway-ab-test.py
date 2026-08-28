@@ -16,6 +16,8 @@ Outputs a JSON report to stdout and a human-readable summary to stderr.
 """
 
 import json
+import math
+import os
 import time
 import sys
 import re
@@ -28,6 +30,26 @@ DIRECT = "http://127.0.0.1:11434/v1"
 CORTEX_REST = "http://127.0.0.1:3100/api/v1"
 MODEL = "glm-5.2:cloud"
 AGENT_ID = "arlo"
+
+
+def read_relevance_threshold() -> float:
+    """Read the production normalized relevance gate contract."""
+    threshold = float(os.getenv("CORTEX_RELEVANCE_THRESHOLD", "0.5"))
+    if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
+        raise ValueError("CORTEX_RELEVANCE_THRESHOLD must be between 0 and 1")
+    return threshold
+
+
+CORTEX_RELEVANCE_THRESHOLD = read_relevance_threshold()
+
+
+def would_inject_recall(top_score: float, context: str, query: str) -> bool:
+    """Mirror the production gateway's score, context, and query gates."""
+    return (
+        top_score >= CORTEX_RELEVANCE_THRESHOLD
+        and bool(context and context.strip())
+        and len(query) >= 10
+    )
 
 # Test queries -- designed to probe different scenarios:
 #   1. A query that SHOULD match existing Cortex memories (Cortex project context)
@@ -196,7 +218,11 @@ def run_test():
             recall_token_count = len(recall_context) // 4
 
         recall_len = len(recall_context)
-        would_inject = recall_top_score >= 5.0 and recall_len > 0 and len(query) >= 10
+        would_inject = would_inject_recall(
+            recall_top_score,
+            recall_context,
+            query,
+        )
 
         print(f"  Recall: {recall_len} chars, ~{recall_token_count} tokens, {recall_mem_count} memories, "
               f"top_score={recall_top_score:.3f}, would_inject={would_inject}",

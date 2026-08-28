@@ -200,7 +200,7 @@ async function main() {
     out.push(
       "Cortex MCP is wired in - use the FULL loop, not just ingest: " +
       "(1) `cortex_search`/`cortex_recall` at every task boundary and BEFORE deciding or debugging; recalled memories are labile for 1h. " +
-      "(2) If new info updates something recalled, `cortex_reconsolidate` it - ingest REFUSES near-duplicates. " +
+      "(2) If new info updates something recalled, `cortex_reconsolidate` it; ingest replays exact retries but retains distinct facts. " +
       "(3) `cortex_ingest` only for genuinely novel facts, written AT THE MOMENT of discovery (never batched to session end). " +
       "(4) Before a repeatable task, `cortex_skill_retrieve`; after applying a skill, `cortex_skill_executed`; improve with `cortex_skill_refine`. " +
       "(5) Significant decisions: `cortex_reason` with honest confidence. " +

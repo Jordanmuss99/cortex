@@ -11,11 +11,60 @@ import { scrubEmDashes } from "../lib/scrub.js";
 import { eq, sql, desc, and } from "drizzle-orm";
 import { readFile } from "fs/promises";
 import { join } from "path";
+import { createMemoryServiceDependencies } from "../memory/index.js";
+import { createWorkingSetService } from "../memory/working-set.js";
+import type { WorkingSetService } from "../memory/types.js";
 
-interface ThreadResult {
+export interface ThreadResult {
   insights: string[];
   actions: string[];
   questions: string[];
+}
+
+export interface StrategicThreadOptions {
+  workingSet?: WorkingSetService;
+  signal?: AbortSignal;
+  beginWorkingCommit?: () => void;
+}
+
+const defaultBackgroundWorkingSet = createWorkingSetService(
+  createMemoryServiceDependencies()
+);
+const STRATEGIC_WORKING_KEY = "background:strategic";
+const STRATEGIC_EXPIRY_MS = 7 * 24 * 60 * 60 * 1_000;
+
+function assertNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error("strategic thread was cancelled before commit");
+  }
+}
+
+export async function reconcileStrategicWorkingSet(
+  agentId: number,
+  result: ThreadResult,
+  workingSet: WorkingSetService,
+  now = new Date()
+): Promise<void> {
+  const nextAction = result.actions[0]?.trim() ?? "";
+  if (nextAction) {
+    await workingSet.upsert({
+      agentId,
+      callerKey: STRATEGIC_WORKING_KEY,
+      kind: "open_loop",
+      content: nextAction,
+      importance: 0.8,
+      displayOrder: 20_000,
+      expiresAt: new Date(now.getTime() + STRATEGIC_EXPIRY_MS).toISOString(),
+    });
+    return;
+  }
+
+  const prior = (await workingSet.list(agentId)).find(
+    (item) => item.callerKey === STRATEGIC_WORKING_KEY
+  );
+  if (prior) {
+    await workingSet.resolve(agentId, prior.id, "strategic_empty_success");
+  }
 }
 
 async function safeReadFile(path: string): Promise<string | null> {
@@ -26,7 +75,12 @@ async function safeReadFile(path: string): Promise<string | null> {
   }
 }
 
-export async function runStrategicThread(agentId: number): Promise<ThreadResult> {
+export async function runStrategicThread(
+  agentId: number,
+  options: StrategicThreadOptions = {}
+): Promise<ThreadResult> {
+  assertNotAborted(options.signal);
+  const workingSet = options.workingSet ?? defaultBackgroundWorkingSet;
   const insights: string[] = [];
   const actions: string[] = [];
   const questions: string[] = [];
@@ -38,7 +92,28 @@ export async function runStrategicThread(agentId: number): Promise<ThreadResult>
     WHERE agent_id = ${agentId}
       AND status = 'active'
       AND priority <= 1
-    ORDER BY created_at DESC
+      AND (valid_from IS NULL OR valid_from <= NOW())
+      AND (valid_until IS NULL OR valid_until > NOW())
+      AND (derivation_expires_at IS NULL OR derivation_expires_at > NOW())
+      AND (
+        ingest_event_id IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM memory_provenance AS provenance
+          JOIN memory_ingest_events AS event
+            ON event.id = provenance.ingest_event_id
+           AND event.agent_id = provenance.agent_id
+          WHERE provenance.agent_id = memory_nodes.agent_id
+            AND provenance.memory_id = memory_nodes.id
+            AND provenance.relation = 'captured_from'
+            AND event.status = 'indexed'
+            AND (
+              event.snapshot_valid_until IS NULL
+              OR event.snapshot_valid_until > NOW()
+            )
+        )
+      )
+    ORDER BY created_at DESC, id DESC
     LIMIT 30
   `);
 
@@ -61,6 +136,27 @@ export async function runStrategicThread(agentId: number): Promise<ThreadResult>
       AND status = 'active'
       AND priority <= 1
       AND created_at < NOW() - INTERVAL '7 days'
+      AND (valid_from IS NULL OR valid_from <= NOW())
+      AND (valid_until IS NULL OR valid_until > NOW())
+      AND (derivation_expires_at IS NULL OR derivation_expires_at > NOW())
+      AND (
+        ingest_event_id IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM memory_provenance AS provenance
+          JOIN memory_ingest_events AS event
+            ON event.id = provenance.ingest_event_id
+           AND event.agent_id = provenance.agent_id
+          WHERE provenance.agent_id = memory_nodes.agent_id
+            AND provenance.memory_id = memory_nodes.id
+            AND provenance.relation = 'captured_from'
+            AND event.status = 'indexed'
+            AND (
+              event.snapshot_valid_until IS NULL
+              OR event.snapshot_valid_until > NOW()
+            )
+        )
+      )
       AND id NOT IN (
         SELECT DISTINCT memory_a FROM memory_synapses
         WHERE last_activated_at > NOW() - INTERVAL '7 days'
@@ -68,6 +164,7 @@ export async function runStrategicThread(agentId: number): Promise<ThreadResult>
         SELECT DISTINCT memory_b FROM memory_synapses
         WHERE last_activated_at > NOW() - INTERVAL '7 days'
       )
+    ORDER BY created_at ASC, id ASC
     LIMIT 10
   `);
 
@@ -107,6 +204,7 @@ export async function runStrategicThread(agentId: number): Promise<ThreadResult>
 
   // Store as cognitive artifact
   const result = { insights, actions, questions };
+  assertNotAborted(options.signal);
   await db.insert(schema.cognitiveArtifacts).values({
     agentId,
     artifactType: "background_thread",
@@ -115,7 +213,16 @@ export async function runStrategicThread(agentId: number): Promise<ThreadResult>
   });
 
   // Update background thread status
+  assertNotAborted(options.signal);
   await upsertThreadStatus(agentId, "strategic", result);
+
+  // Working context is the final guarded mutation. A successful non-empty
+  // recommendation replaces/reconfirms one stable open loop. Empty success
+  // explicitly resolves it; failures and timeouts never reach this point.
+  assertNotAborted(options.signal);
+  options.beginWorkingCommit?.();
+  assertNotAborted(options.signal);
+  await reconcileStrategicWorkingSet(agentId, result, workingSet);
 
   return result;
 }
@@ -321,13 +428,35 @@ async function upsertThreadStatus(agentId: number, threadType: string, findings:
  */
 const THREAD_TIMEOUT_MS = 30_000;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    ),
-  ]);
+function withTimeout<T>(
+  run: (
+    signal: AbortSignal,
+    beginFinalCommit: () => void
+  ) => Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  const controller = new AbortController();
+  let phase: "active" | "committing" | "timed_out" = "active";
+  let timeout: NodeJS.Timeout | undefined;
+  const beginFinalCommit = () => {
+    if (phase !== "active" || controller.signal.aborted) {
+      throw new Error(`${label} timed out before final commit`);
+    }
+    phase = "committing";
+    if (timeout) clearTimeout(timeout);
+  };
+  const timed = new Promise<T>((_, reject) => {
+    timeout = setTimeout(() => {
+      if (phase !== "active") return;
+      phase = "timed_out";
+      controller.abort();
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([run(controller.signal, beginFinalCommit), timed]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 export async function runAllThreads(agentId: number): Promise<{
@@ -339,9 +468,14 @@ export async function runAllThreads(agentId: number): Promise<{
   const errors: string[] = [];
 
   const results = await Promise.allSettled([
-    withTimeout(runStrategicThread(agentId), THREAD_TIMEOUT_MS, "strategic"),
-    withTimeout(runOperationalThread(agentId), THREAD_TIMEOUT_MS, "operational"),
-    withTimeout(runRelationalThread(agentId), THREAD_TIMEOUT_MS, "relational"),
+    withTimeout(
+      (signal, beginWorkingCommit) =>
+        runStrategicThread(agentId, { signal, beginWorkingCommit }),
+      THREAD_TIMEOUT_MS,
+      "strategic"
+    ),
+    withTimeout(() => runOperationalThread(agentId), THREAD_TIMEOUT_MS, "operational"),
+    withTimeout(() => runRelationalThread(agentId), THREAD_TIMEOUT_MS, "relational"),
   ]);
 
   const extract = (r: PromiseSettledResult<ThreadResult>, name: string): ThreadResult | null => {

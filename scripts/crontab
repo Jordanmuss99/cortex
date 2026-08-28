@@ -1,0 +1,21 @@
+# Cortex offline-job crontab -- runs inside the cortex-cron sidecar.
+# All output appended to /var/log/cortex-cron.log (rotated manually or via log volume).
+
+# Reflect: nightly at 03:00 -- extract memories from Cursor transcripts
+0 3 * * * cd /app && node dist/scripts/reflect-cursor.js --limit 40 >> /var/log/cortex-cron.log 2>&1
+
+# Skill harvest: nightly at 03:30 -- extract procedural skills from transcripts
+# (fixes the learning stall: agents never call cortex_skill_store voluntarily)
+30 3 * * * cd /app && node dist/scripts/skill-harvest-cursor.js --limit 20 >> /var/log/cortex-cron.log 2>&1
+
+# Background threads (strategic/operational/relational): daily at 04:00
+0 4 * * * cd /app && node dist/scripts/run-metacognition.js threads --agent arlo >> /var/log/cortex-cron.log 2>&1
+
+# Weekly metacognitive audit: Monday 05:00
+0 5 * * 1 cd /app && node dist/scripts/run-metacognition.js audit --agent arlo >> /var/log/cortex-cron.log 2>&1
+
+# Self-check: every 6h
+0 */6 * * * cd /app && node dist/scripts/run-self-check.js --agent arlo >> /var/log/cortex-cron.log 2>&1
+
+# Dream cycle: nightly at 18:00 (full SWS+REM)
+0 18 * * * curl -s -X POST http://cortex:3100/api/v1/dream -H 'Content-Type: application/json' -d '{"agentId":"arlo"}' >> /var/log/cortex-cron.log 2>&1

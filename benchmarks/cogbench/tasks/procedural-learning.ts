@@ -300,7 +300,7 @@ async function evaluateScenario(
       successRate: 0,
     };
     for (const success of config.executions) {
-      lastResult = await recordExecution(procId, success);
+      lastResult = await recordExecution(agentId, procId, success);
     }
 
     // Step 3: Check proficiency accuracy

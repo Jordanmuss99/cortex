@@ -262,6 +262,7 @@ async function evaluateScenario(
 
       // Step 4: Reconsolidate with corrected information
       const reconResult = await reconsolidate(
+        agentId,
         initialNodeIds[0],
         config.correctedFact,
         config.reason

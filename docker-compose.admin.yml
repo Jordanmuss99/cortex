@@ -1,0 +1,13 @@
+services:
+  db:
+    ports:
+      - "127.0.0.1:${CORTEX_ADMIN_DB_PORT:-5432}:5432"
+  cortex:
+    ports:
+      - "127.0.0.1:${CORTEX_ADMIN_REST_PORT:-3100}:3100"
+  cortex-mcp:
+    ports:
+      - "127.0.0.1:${CORTEX_ADMIN_MCP_PORT:-8001}:8000"
+  cortex-dashboard:
+    ports:
+      - "127.0.0.1:${CORTEX_ADMIN_DASHBOARD_PORT:-8099}:80"

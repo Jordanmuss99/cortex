@@ -1,26 +1,45 @@
 services:
   db:
-    image: pgvector/pgvector:pg16
-    container_name: cortex-db
+    image: pgvector/pgvector:pg16@sha256:ad2e18408bf447f62092a8a5259e7df10505c5a0360bd1a1853ac8b8b0763da2
     restart: unless-stopped
-    networks:
-      - cortex-network
+    networks: [private]
     environment:
-      POSTGRES_USER: "cortex"
-      POSTGRES_PASSWORD: "cortex"
-      POSTGRES_DB: "cortex"
+      POSTGRES_USER: "${CORTEX_DB_OWNER_USER:-cortex}"
+      POSTGRES_PASSWORD: "${CORTEX_DB_OWNER_PASSWORD:?CORTEX_DB_OWNER_PASSWORD is required}"
+      POSTGRES_DB: "${CORTEX_DB_NAME:-cortex}"
     volumes:
       - cortex-pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+      - ./init-cortex-db.sql:/docker-entrypoint-initdb.d/001-cortex-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cortex-migrate:
+    build: .
+    restart: "no"
+    command: ["npm", "run", "oauth:prepare:compiled"]
+    networks: [private]
+    environment:
+      DATABASE_URL: "${CORTEX_DATABASE_OWNER_URL:?CORTEX_DATABASE_OWNER_URL is required}"
+      MCP_OAUTH_DATABASE_URL: "${MCP_OAUTH_DATABASE_URL:?MCP_OAUTH_DATABASE_URL is required}"
+      MCP_OAUTH_OPERATOR_DATABASE_URL: "${MCP_OAUTH_OPERATOR_DATABASE_URL:?MCP_OAUTH_OPERATOR_DATABASE_URL is required}"
+      BASE_URL: "${CORTEX_PUBLIC_BASE_URL:-https://cortex.obsidiannetwork.au}"
+      ISSUER_URL: "${CORTEX_OAUTH_ISSUER_URL:-https://cortex.obsidiannetwork.au}"
+      MCP_OAUTH_USERNAME: "${MCP_OAUTH_USERNAME:?MCP_OAUTH_USERNAME is required}"
+      MCP_OAUTH_AGENT_ID: "${MCP_OAUTH_AGENT_ID:?MCP_OAUTH_AGENT_ID is required}"
+    depends_on:
+      db:
+        condition: service_healthy
 
   cortex:
     build: .
     restart: unless-stopped
-    networks:
-      - cortex-network
+    networks: [private]
     environment:
-      DATABASE_URL: "postgresql://cortex:cortex@cortex-db:5432/cortex"
+      DATABASE_URL: "${CORTEX_MEMORY_DATABASE_URL:?CORTEX_MEMORY_DATABASE_URL must use cortex_memory_runtime}"
+      TZ: "Australia/Melbourne"
       EMBEDDING_PROVIDER: "voyage"
       VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
@@ -28,69 +47,133 @@ services:
       CORTEX_DUP_THRESHOLD: "${CORTEX_DUP_THRESHOLD:-}"
       CORTEX_VITALS_THRESHOLDS: "${CORTEX_VITALS_THRESHOLDS:-}"
       CORTEX_LLM_PROVIDER: "ollama_cloud"
-      CORTEX_LLM_MODEL: "glm-5.2:cloud"
-      OLLAMA_CLOUD_URL: "https://ollama.com/v1"
+      CORTEX_LLM_MODEL: "glm-5.2a"
+      OLLAMA_CLOUD_URL: "https://rfyj2z2.abc-tunnel.us/v1"
       OLLAMA_API_KEY: "${OLLAMA_API_KEY}"
       CORTEX_LLM_ENTITIES: "true"
-    ports:
-      - "3100:3100"
+      CORTEX_HEADLESS: "true"
+      CORTEX_BUILD_ID: "${CORTEX_BUILD_ID:?CORTEX_BUILD_ID must be immutable}"
     volumes:
       - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     depends_on:
-      - db
+      cortex-migrate:
+        condition: service_completed_successfully
+
+  cortex-worker:
+    build: .
+    restart: unless-stopped
+    networks: [private]
+    command: ["node", "dist/src/worker.js"]
+    environment:
+      DATABASE_URL: "${CORTEX_MEMORY_DATABASE_URL:?CORTEX_MEMORY_DATABASE_URL must use cortex_memory_runtime}"
+      TZ: "Australia/Melbourne"
+      EMBEDDING_PROVIDER: "voyage"
+      VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
+      CORTEX_LLM_PROVIDER: "ollama_cloud"
+      CORTEX_LLM_MODEL: "glm-5.2a"
+      OLLAMA_CLOUD_URL: "https://rfyj2z2.abc-tunnel.us/v1"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY}"
+      CORTEX_LLM_ENTITIES: "true"
+      CORTEX_HEADLESS: "true"
+      CORTEX_BUILD_ID: "${CORTEX_BUILD_ID:?CORTEX_BUILD_ID must be immutable}"
+      CORTEX_INGEST_WORKER_CONCURRENCY: "${CORTEX_INGEST_WORKER_CONCURRENCY:-4}"
+      CORTEX_INGEST_MAX_ATTEMPTS: "${CORTEX_INGEST_MAX_ATTEMPTS:-5}"
+      EMBEDDING_TIMEOUT_MS: "${EMBEDDING_TIMEOUT_MS:-20000}"
+    depends_on:
+      cortex-migrate:
+        condition: service_completed_successfully
 
   cortex-mcp:
     build: .
     restart: unless-stopped
-    networks:
-      - cortex-network
+    networks: [private]
     environment:
-      DATABASE_URL: "postgresql://cortex:cortex@cortex-db:5432/cortex"
+      DATABASE_URL: "${CORTEX_MEMORY_DATABASE_URL:?CORTEX_MEMORY_DATABASE_URL must use cortex_memory_runtime}"
+      CORTEX_BUILD_ID: "${CORTEX_BUILD_ID:?CORTEX_BUILD_ID must be immutable}"
+      CORTEX_REST_URL: "http://cortex:3100"
+      CORTEX_SKIP_DB_MIGRATIONS: "true"
+      CORTEX_IMPORT_ROOT: "/imports"
+      CORTEX_WORKSPACE: "/imports/corpus"
+      TZ: "Australia/Melbourne"
       EMBEDDING_PROVIDER: "voyage"
       VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
       CORTEX_LLM_PROVIDER: "ollama_cloud"
-      CORTEX_LLM_MODEL: "glm-5.2:cloud"
-      OLLAMA_CLOUD_URL: "https://ollama.com/v1"
+      CORTEX_LLM_MODEL: "glm-5.2a"
+      OLLAMA_CLOUD_URL: "https://rfyj2z2.abc-tunnel.us/v1"
       OLLAMA_API_KEY: "${OLLAMA_API_KEY}"
       CORTEX_LLM_ENTITIES: "true"
-    ports:
-      - "8001:8000"
+      CORTEX_HEADLESS: "true"
+    volumes:
+      - ./imports:/imports:ro
     stdin_open: true
     tty: true
     command:
       [
-        "npx",
-        "-y",
-        "supergateway",
-        "--stdio",
-        "npx tsx src/mcp/server.ts",
-        "--outputTransport",
-        "streamableHttp",
-        "--port",
-        "8000",
-        "--streamableHttpPath",
-        "/mcp",
+        "supergateway", "--stdio", "node dist/src/mcp/server.js",
+        "--outputTransport", "streamableHttp", "--port", "8000",
+        "--streamableHttpPath", "/mcp", "--stateful",
+        "--sessionTimeout", "3600000", "--protocolVersion", "2025-06-18",
+        "--logLevel", "none", "--healthEndpoint", "/healthz"
       ]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
-      - db
+      cortex-migrate:
+        condition: service_completed_successfully
+      cortex:
+        condition: service_healthy
 
   cortex-oauth-gateway:
-    build: ./oauth-gateway
-    container_name: cortex-oauth-gateway
+    build:
+      context: .
+      dockerfile: oauth-gateway/Dockerfile
     restart: unless-stopped
-    networks:
-      - cortex-network
+    networks: [edge, private]
     environment:
-      BASE_URL: "https://cortex.obsidiannetwork.au"
-      RESOURCE_URL: "https://cortex.obsidiannetwork.au/mcp"
-      ISSUER_URL: "https://cortex.obsidiannetwork.au"
+      BASE_URL: "${CORTEX_PUBLIC_BASE_URL:-https://cortex.obsidiannetwork.au}"
+      RESOURCE_URL: "${CORTEX_OAUTH_RESOURCE_URL:-https://cortex.obsidiannetwork.au/mcp}"
+      ISSUER_URL: "${CORTEX_OAUTH_ISSUER_URL:-https://cortex.obsidiannetwork.au}"
       MCP_TARGET: "http://cortex-mcp:8000"
       REST_TARGET: "http://cortex:3100"
-      MCP_OAUTH_USERNAME: "${MCP_OAUTH_USERNAME}"
-      MCP_OAUTH_PASSWORD: "${MCP_OAUTH_PASSWORD}"
-      MCP_OAUTH_JWT_SECRET: "${MCP_OAUTH_JWT_SECRET}"
+      MCP_OAUTH_DATABASE_URL: "${MCP_OAUTH_DATABASE_URL:?MCP_OAUTH_DATABASE_URL is required}"
+      MCP_OAUTH_AGENT_ID: "${MCP_OAUTH_AGENT_ID:?MCP_OAUTH_AGENT_ID is required}"
+      MCP_OAUTH_USERNAME: "${MCP_OAUTH_USERNAME:?MCP_OAUTH_USERNAME is required}"
+      MCP_OAUTH_PASSWORD: "${MCP_OAUTH_PASSWORD:?MCP_OAUTH_PASSWORD is required}"
+      MCP_OAUTH_JWT_SECRET: "${MCP_OAUTH_JWT_SECRET:?MCP_OAUTH_JWT_SECRET is required}"
+      MCP_OAUTH_ACCEPT_LEGACY_UNTIL: "${MCP_OAUTH_ACCEPT_LEGACY_UNTIL:?MCP_OAUTH_ACCEPT_LEGACY_UNTIL is required}"
+      MCP_OAUTH_STATE_FILE: "/var/lib/cortex-oauth/state.json"
+      MCP_OAUTH_FRESH_INSTALL: "${MCP_OAUTH_FRESH_INSTALL:-0}"
+      MCP_OAUTH_REFRESH_RETRY_GRACE_SECONDS: "${MCP_OAUTH_REFRESH_RETRY_GRACE_SECONDS:-30}"
+      MCP_OAUTH_TRUSTED_IP_HEADER: "cf-connecting-ip"
+      MCP_OAUTH_TRUSTED_PROXY_CIDRS: >-
+        173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22
+        141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20
+        197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13
+        104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32
+        2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32
+        2a06:98c0::/29 2c0f:f248::/32
+      MCP_OAUTH_LOGIN_SESSION_TTL_SECONDS: "${MCP_OAUTH_LOGIN_SESSION_TTL_SECONDS:-2592000}"
+      MCP_OAUTH_LOGIN_ATTEMPT_LIMIT: "${MCP_OAUTH_LOGIN_ATTEMPT_LIMIT:-10}"
+      MCP_OAUTH_LOGIN_ATTEMPT_WINDOW_SECONDS: "${MCP_OAUTH_LOGIN_ATTEMPT_WINDOW_SECONDS:-900}"
+      MCP_OAUTH_REGISTRATION_ATTEMPT_LIMIT: "${MCP_OAUTH_REGISTRATION_ATTEMPT_LIMIT:-30}"
+      MCP_OAUTH_REGISTRATION_ATTEMPT_WINDOW_SECONDS: "${MCP_OAUTH_REGISTRATION_ATTEMPT_WINDOW_SECONDS:-3600}"
       LINEAR_OAUTH_CLIENT_ID: "${LINEAR_OAUTH_CLIENT_ID:-linear-cortex}"
       LINEAR_OAUTH_CLIENT_SECRET: "${LINEAR_OAUTH_CLIENT_SECRET:-}"
       LINEAR_OAUTH_REDIRECT_URI: "${LINEAR_OAUTH_REDIRECT_URI:-https://linear.app/connect/mcp/callback}"
@@ -98,15 +181,98 @@ services:
       NOTION_OAUTH_CLIENT_SECRET: "${NOTION_OAUTH_CLIENT_SECRET:-}"
       NOTION_OAUTH_REDIRECT_URI: "${NOTION_OAUTH_REDIRECT_URI:-https://app.notion.com/workflows/mcp/oauth/callback}"
     ports:
-      - "8091:8080"
+      - "127.0.0.1:${CORTEX_GATEWAY_PORT:-8091}:8080"
+    volumes:
+      - cortex-oauth-state:/var/lib/cortex-oauth:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     depends_on:
-      - cortex
-      - cortex-mcp
+      cortex-migrate:
+        condition: service_completed_successfully
+      cortex:
+        condition: service_healthy
+      cortex-mcp:
+        condition: service_healthy
+
+  cortex-oauth-admin:
+    profiles: [admin]
+    build:
+      context: .
+      dockerfile: oauth-gateway/Dockerfile
+    entrypoint: ["node", "admin.js"]
+    command: []
+    restart: "no"
+    networks: [private]
+    environment:
+      MCP_OAUTH_OPERATOR_DATABASE_URL: "${MCP_OAUTH_OPERATOR_DATABASE_URL:?MCP_OAUTH_OPERATOR_DATABASE_URL is required}"
+    depends_on:
+      cortex-migrate:
+        condition: service_completed_successfully
+
+  cortex-dashboard:
+    image: nginx:alpine@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa
+    restart: unless-stopped
+    networks: [private]
+    volumes:
+      - ./dashboard/cortex-graph.html:/usr/share/nginx/html/cortex-graph.html:ro
+      - ./dashboard/3d-force-graph.min.js:/usr/share/nginx/html/3d-force-graph.min.js:ro
+      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      cortex-migrate:
+        condition: service_completed_successfully
+      cortex:
+        condition: service_healthy
+
+  cortex-cron:
+    build:
+      context: .
+      dockerfile: Dockerfile.cron
+    restart: unless-stopped
+    networks: [private]
+    environment:
+      DATABASE_URL: "${CORTEX_MEMORY_DATABASE_URL:?CORTEX_MEMORY_DATABASE_URL must use cortex_memory_runtime}"
+      CORTEX_BUILD_ID: "${CORTEX_BUILD_ID:?CORTEX_BUILD_ID must be immutable}"
+      CORTEX_REST_URL: "http://cortex:3100"
+      TZ: "Australia/Melbourne"
+      CORTEX_AGENT_ID: "${CORTEX_CRON_AGENT_ID:-arlo}"
+      CORTEX_LLM_PROVIDER: "ollama_cloud"
+      CORTEX_LLM_MODEL: "glm-5.2a"
+      OLLAMA_URL: "${OLLAMA_URL:-http://192.168.30.3:11434/v1}"
+      REFLECT_MODEL: "${REFLECT_MODEL:-qwen3-coder:30b}"
+      REFLECT_FALLBACK_URL: "${REFLECT_FALLBACK_URL:-https://rfyj2z2.abc-tunnel.us/v1}"
+      REFLECT_FALLBACK_MODEL: "${REFLECT_FALLBACK_MODEL:-glm-5.2a}"
+      REFLECT_FALLBACK_KEY: "${OLLAMA_API_KEY}"
+      OLLAMA_API_KEY: ""
+      CORTEX_HEADLESS: "true"
+      EMBEDDING_PROVIDER: "voyage"
+      VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
+    volumes:
+      - /home/docker/.cursor:/root/.cursor:ro
+      - cortex-cron-state:/root/.cortex
+    depends_on:
+      cortex-migrate:
+        condition: service_completed_successfully
+      cortex:
+        condition: service_healthy
 
 volumes:
   cortex-pgdata:
+    name: "${CORTEX_DB_VOLUME_NAME:-cortex-pgdata}"
+    external: true
+  cortex-oauth-state:
+    name: "${CORTEX_OAUTH_STATE_VOLUME_NAME:-cortex_cortex-oauth-state}"
+    external: true
+  cortex-cron-state:
+    name: "${CORTEX_CRON_STATE_VOLUME_NAME:-cortex_cortex-cron-state}"
     external: true
 
 networks:
-  cortex-network:
+  edge:
+    name: "${CORTEX_EDGE_NETWORK_NAME:-cortex-network}"
     external: true
+  private:
+    driver: bridge

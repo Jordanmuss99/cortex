@@ -66,5 +66,5 @@ export interface ProceduralMemory {
 export interface ProceduralMatch {
   memory: ProceduralMemory;
   relevanceScore: number;
-  matchType: "trigger" | "domain" | "semantic";
+  matchType: "trigger" | "semantic";
 }

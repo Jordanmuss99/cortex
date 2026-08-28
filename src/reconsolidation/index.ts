@@ -95,6 +95,7 @@ export async function isLabile(memoryId: number): Promise<boolean> {
  * @returns ReconsolidationResult
  */
 export async function reconsolidate(
+  agentId: number,
   memoryId: number,
   newContent: string,
   reason: string = "belief_update"
@@ -105,6 +106,7 @@ export async function reconsolidate(
            EXTRACT(EPOCH FROM (NOW() - last_recalled_at)) * 1000 AS ms_since_recall
     FROM memory_nodes
     WHERE id = ${memoryId}
+      AND agent_id = ${agentId}
       AND status = 'active'
     LIMIT 1
   `);
@@ -137,41 +139,17 @@ export async function reconsolidate(
     return { memoryId, status: "window_closed", resonanceBoost: 0 };
   }
 
-  // Step 2: Mark temporal validity — the old version is no longer current
-  await db.execute(sql`
-    UPDATE memory_nodes
-    SET valid_until = NOW()
-    WHERE id = ${memoryId}
-  `);
-
-  // Step 3: Store original content as a cognitive artifact (audit trail)
-  const [artifact] = await db
-    .insert(schema.cognitiveArtifacts)
-    .values({
-      agentId: memory.agent_id,
-      artifactType: "correction",
-      content: scrubEmDashes({
-        memoryId: memory.id,
-        originalContent: memory.content,
-        newContent,
-        reason,
-        reconsolidatedAt: new Date().toISOString(),
-      }),
-      resonanceScore: 3.0,
-    })
-    .returning({ id: schema.cognitiveArtifacts.id });
-
-  // Step 3: Re-embed the new content
+  // Complete provider work before opening the mutation transaction. A provider
+  // outage must leave the active memory and its audit history untouched.
   const [newEmbedding] = await embedTexts([newContent]);
 
-  // Step 4: Run through hippocampal encoding (DG + CA1)
+  // Run through hippocampal encoding (DG + CA1).
   const { sparseCode, noveltyResult } = await hippocampalEncode(
     memory.agent_id,
     newEmbedding,
     memory.priority
   );
 
-  // Step 5: Update the memory node
   // Reconsolidated memories get a resonance boost (they've been validated/corrected)
   const resonanceBoost = 1.5;
   const newResonance = Math.min(
@@ -184,33 +162,53 @@ export async function reconsolidate(
   const entitiesLiteral = `{${newEntities.map((e) => `"${e.replace(/"/g, '\\"')}"`).join(",")}}`;
   const tagsLiteral = `{${newTags.map((t) => `"${t.replace(/"/g, '\\"')}"`).join(",")}}`;
 
-  await db.execute(sql`
-    UPDATE memory_nodes
-    SET content = ${newContent},
-        embedding = ${`[${newEmbedding.join(",")}]`}::vector,
-        resonance_score = ${newResonance},
-        novelty_score = ${noveltyResult.noveltyScore},
-        entities = ${entitiesLiteral}::text[],
-        semantic_tags = ${tagsLiteral}::text[],
-        valid_from = NOW(),
-        valid_until = NULL,
-        updated_at = NOW(),
-        last_recalled_at = NULL
-    WHERE id = ${memoryId}
-  `);
+  let artifactId = 0;
+  await db.transaction(async (tx) => {
+    const [artifact] = await tx
+      .insert(schema.cognitiveArtifacts)
+      .values({
+        agentId,
+        artifactType: "correction",
+        content: scrubEmDashes({
+          memoryId: memory.id,
+          originalContent: memory.content,
+          newContent,
+          reason,
+          reconsolidatedAt: new Date().toISOString(),
+        }),
+        resonanceScore: 3.0,
+      })
+      .returning({ id: schema.cognitiveArtifacts.id });
+    artifactId = artifact.id;
 
-  // Step 6: Update hippocampal code
-  await db.execute(sql`
-    DELETE FROM hippocampal_codes WHERE memory_id = ${memoryId}
-  `);
+    await tx.execute(sql`
+      UPDATE memory_nodes
+      SET content = ${newContent},
+          embedding = ${`[${newEmbedding.join(",")}]`}::vector,
+          resonance_score = ${newResonance},
+          novelty_score = ${noveltyResult.noveltyScore},
+          entities = ${entitiesLiteral}::text[],
+          semantic_tags = ${tagsLiteral}::text[],
+          valid_from = NOW(),
+          valid_until = NULL,
+          updated_at = NOW(),
+          last_recalled_at = NULL
+      WHERE id = ${memoryId} AND agent_id = ${agentId}
+    `);
 
-  await db.insert(schema.hippocampalCodes).values({
-    memoryId,
-    agentId: memory.agent_id,
-    sparseIndices: sparseCode.indices,
-    sparseValues: sparseCode.values,
-    sparseDim: sparseCode.dim,
-    noveltyScore: noveltyResult.noveltyScore,
+    await tx.execute(sql`
+      DELETE FROM hippocampal_codes
+      WHERE memory_id = ${memoryId} AND agent_id = ${agentId}
+    `);
+
+    await tx.insert(schema.hippocampalCodes).values({
+      memoryId,
+      agentId,
+      sparseIndices: sparseCode.indices,
+      sparseValues: sparseCode.values,
+      sparseDim: sparseCode.dim,
+      noveltyScore: noveltyResult.noveltyScore,
+    });
   });
 
   // Step 7: Clear labile state (memory has restabilized with new content)
@@ -225,7 +223,7 @@ export async function reconsolidate(
     status: "reconsolidated",
     previousContent: memory.content,
     newContent,
-    artifactId: artifact.id,
+    artifactId,
     resonanceBoost,
   };
 }

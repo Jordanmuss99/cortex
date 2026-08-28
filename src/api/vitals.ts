@@ -360,6 +360,33 @@ router.get("/", async (req: Request, res: Response) => {
       } else okChecks.push(`write volume normal (${todayTotal} today, ~${median}/day median)`);
     }
 
+    // Growth-vs-pruning balance: flag if the active corpus grew >20% over 14d
+    // while pruning archived/deleted <5% of new ingests. This catches the
+    // unbounded-growth failure mode where P0/P1 inflation defeats pruning.
+    {
+      const growthRes = await db.execute(sql`
+        WITH span AS (
+          SELECT
+            (SELECT COUNT(*) FROM memory_nodes WHERE agent_id = ${agentId} AND status = 'active'
+              AND created_at > NOW() - INTERVAL '14 days') AS new_ingests,
+            (SELECT COUNT(*) FROM memory_nodes WHERE agent_id = ${agentId} AND status != 'active'
+              AND updated_at > NOW() - INTERVAL '14 days') AS pruned,
+            (SELECT COUNT(*) FROM memory_nodes WHERE agent_id = ${agentId} AND status = 'active') AS active_now
+        )
+        SELECT new_ingests, pruned, active_now,
+               CASE WHEN active_now > 0 THEN ROUND((new_ingests::numeric / active_now) * 100, 1) ELSE 0 END AS growth_pct
+        FROM span
+      `);
+      const g = growthRes.rows[0] as any;
+      const newIngests = Number(g?.new_ingests || 0);
+      const pruned = Number(g?.pruned || 0);
+      const growthPct = Number(g?.growth_pct || 0);
+      const prunePct = newIngests > 0 ? (pruned / newIngests) * 100 : 0;
+      if (growthPct > 20 && prunePct < 5 && newIngests > 20) {
+        push("growth", "warn", `Corpus growing faster than pruning (${growthPct}% growth, ${prunePct.toFixed(1)}% pruned over 14d)`, `Active store grew by ${newIngests} memories in 14d while only ${pruned} were archived/deleted. Check P0/P1 inflation and pruning thresholds.`);
+      } else okChecks.push(`growth/pruning balanced (${growthPct}% growth, ${prunePct.toFixed(0)}% pruned)`);
+    }
+
     const sevRank = { critical: 0, warn: 1, info: 2 } as Record<Severity, number>;
     warnings.sort((a, b) => sevRank[a.severity] - sevRank[b.severity]);
 

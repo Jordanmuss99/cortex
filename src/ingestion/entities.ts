@@ -10,6 +10,7 @@
  * that regex can't catch ("the CEO" → "Jane Smith").
  */
 import { llmComplete } from "../lib/llm.js";
+import type { EntityEnrichmentResult } from "../memory/types.js";
 
 // Add your known entities here for fast matching.
 // Format: "Canonical Name": ["alias1", "alias2", ...]
@@ -162,35 +163,50 @@ function extractEntitiesFast(text: string): string[] {
  * LLM-based entity extraction with co-reference resolution.
  * Returns canonical entity names, resolving aliases and references.
  */
-async function extractEntitiesLLM(text: string, fastEntities: string[]): Promise<string[]> {
-  try {
-    const response = await llmComplete(
-      [
-        {
-          role: "user",
-          content: `Extract all named entities (people, companies, products, places) from this text. Resolve co-references ("the CEO" → "Jane Smith", "the parent company" → "Acme Corp"). Return ONLY a JSON array of canonical entity names, no explanation.
+async function extractEntitiesLLMStrict(
+  text: string,
+  fastEntities: string[]
+): Promise<string[]> {
+  const response = await llmComplete(
+    [
+      {
+        role: "user",
+        content: `Extract all named entities (people, companies, products, places) from this text. Resolve co-references ("the CEO" → "Jane Smith", "the parent company" → "Acme Corp"). Return ONLY a JSON array of canonical entity names, no explanation.
 
 Known entities for disambiguation: ${Object.keys(KNOWN_ENTITIES).join(", ")}
 
 Text:
 ${text.slice(0, 2000)}`,
-        },
-      ],
-      { maxTokens: 256, temperature: 0 }
-    );
+      },
+    ],
+    { maxTokens: 256, temperature: 0 }
+  );
 
-    const match = response.content.match(/\[[\s\S]*?\]/);
-    if (match) {
-      const parsed = JSON.parse(match[0]) as string[];
-      // Merge with fast entities, deduplicate
-      const merged = new Set([...fastEntities, ...parsed.filter((e) => typeof e === "string" && e.length > 0)]);
-      return Array.from(merged);
-    }
-  } catch (err) {
-    console.error("[entities] LLM extraction failed, using fast-only:", err);
+  const parsed: unknown = JSON.parse(response.content.trim());
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length > 64 ||
+    parsed.some(
+      (entity) =>
+        typeof entity !== "string" ||
+        entity !== entity.trim() ||
+        entity.length < 1 ||
+        entity.length > 256 ||
+        /[\u0000-\u001f\u007f]/.test(entity)
+    )
+  ) {
+    throw new Error("entity_result_invalid");
   }
 
-  return fastEntities;
+  return [...new Set([...fastEntities, ...parsed])].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+}
+
+function logEntityDegradation(_error: unknown): void {
+  console.error("[entities] Optional enrichment degraded", {
+    code: "entity_enrichment_degraded",
+  });
 }
 
 /**
@@ -201,7 +217,11 @@ export async function extractEntities(text: string): Promise<string[]> {
   const fast = extractEntitiesFast(text);
 
   if (USE_LLM_ENTITIES) {
-    return extractEntitiesLLM(text, fast);
+    try {
+      return await extractEntitiesLLMStrict(text, fast);
+    } catch (error) {
+      logEntityDegradation(error);
+    }
   }
 
   return fast;
@@ -210,6 +230,27 @@ export async function extractEntities(text: string): Promise<string[]> {
 /** Synchronous fast-only extraction (for backward compatibility in hot paths) */
 export function extractEntitiesSync(text: string): string[] {
   return extractEntitiesFast(text);
+}
+
+export async function extractEntitiesWithDiagnostics(
+  text: string
+): Promise<EntityEnrichmentResult> {
+  const deterministic = extractEntitiesSync(text);
+  if (!USE_LLM_ENTITIES) {
+    return { entities: deterministic, warnings: [] };
+  }
+  try {
+    return {
+      entities: await extractEntitiesLLMStrict(text, deterministic),
+      warnings: [],
+    };
+  } catch (error) {
+    logEntityDegradation(error);
+  }
+  return {
+    entities: deterministic,
+    warnings: ["entity_enrichment_degraded"],
+  };
 }
 
 /**

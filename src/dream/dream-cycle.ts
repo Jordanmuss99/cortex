@@ -164,6 +164,7 @@ export async function runDreamCycle(
         completedAt: new Date(),
       })
       .where(eq(schema.dreamCycleLogs.id, logEntry.id));
+    throw err;
   }
 
   return stats;
@@ -201,12 +202,12 @@ async function phaseResonanceAnalysis(agentId: number): Promise<number> {
     )
     UPDATE memory_nodes mn
     SET resonance_score = (
-      0.15 * EXP(
+      0.2 * EXP(
         -0.023 * EXTRACT(EPOCH FROM (NOW() - mn.created_at)) / 86400
         / (1.0 + 0.3 * LN(mn.access_count + 1) + 0.2 * ss.connectivity_score)
       )
       + 0.2 * LN(mn.access_count + 1)
-      + 0.25 * ss.connectivity_score
+      + 0.3 * ss.connectivity_score
       + 0.2 * CASE mn.priority
           WHEN 0 THEN 1.0
           WHEN 1 THEN 0.8
@@ -216,7 +217,6 @@ async function phaseResonanceAnalysis(agentId: number): Promise<number> {
           ELSE 0.5
         END
       + 0.1 * LEAST(mn.access_count / 10.0, 1.0)
-      + 0.1 * LEAST(GREATEST(COALESCE(mn.novelty_score, 0.5), 0.0), 1.0)
     ) * 10.0,
     updated_at = NOW()
     FROM synapse_strength ss
@@ -449,7 +449,7 @@ async function phasePruning(agentId: number): Promise<{
   );
 
   // Tier 1: Delete bottom 5% resonance, old memories (exclude P0 AND emotionally salient)
-  // P1 is now eligible for deletion if very old (>60d), never accessed
+  // P1 is eligible for deletion if old (>30d) and rarely accessed (<=1)
   const deleteResult = await db.execute(sql`
     UPDATE memory_nodes mn
     SET status = 'deleted', updated_at = NOW()
@@ -458,7 +458,7 @@ async function phasePruning(agentId: number): Promise<{
       AND mn.priority > 0
       AND mn.resonance_score < ${deleteThreshold}
       AND mn.created_at < NOW() - INTERVAL '30 days'
-      AND (mn.priority > 1 OR (mn.priority = 1 AND mn.access_count = 0 AND mn.created_at < NOW() - INTERVAL '60 days'))
+      AND (mn.priority > 1 OR (mn.priority = 1 AND mn.access_count <= 1 AND mn.created_at < NOW() - INTERVAL '30 days'))
       AND NOT EXISTS (
         SELECT 1 FROM emotional_valence ev
         WHERE ev.memory_id = mn.id AND ev.decay_resistance > 0.5
@@ -467,7 +467,7 @@ async function phasePruning(agentId: number): Promise<{
   const deleted = Number((deleteResult as { rowCount?: number }).rowCount || 0);
 
   // Tier 2: Archive bottom 15% resonance, moderately old memories (exclude P0 AND emotionally salient)
-  // P1 is eligible for archiving if old (>30d) and never accessed
+  // P1 is eligible for archiving if moderately old (>21d) and rarely accessed (<=1)
   const archiveResult = await db.execute(sql`
     UPDATE memory_nodes mn
     SET status = 'archived', updated_at = NOW()
@@ -476,7 +476,7 @@ async function phasePruning(agentId: number): Promise<{
       AND mn.priority > 0
       AND mn.resonance_score < ${archiveThreshold}
       AND mn.created_at < NOW() - INTERVAL '14 days'
-      AND (mn.priority > 1 OR (mn.priority = 1 AND mn.access_count = 0 AND mn.created_at < NOW() - INTERVAL '30 days'))
+      AND (mn.priority > 1 OR (mn.priority = 1 AND mn.access_count <= 1 AND mn.created_at < NOW() - INTERVAL '21 days'))
       AND NOT EXISTS (
         SELECT 1 FROM emotional_valence ev
         WHERE ev.memory_id = mn.id AND ev.decay_resistance > 0.4
@@ -813,7 +813,8 @@ async function phaseFreeAssociation(agentId: number): Promise<{
       // Check if a semantic synapse already exists (other types don't block novel discovery)
       const existing = await db.execute(sql`
         SELECT id FROM memory_synapses
-        WHERE memory_a = ${Math.min(nodeA.id, nodeB.id)}
+        WHERE agent_id = ${agentId}
+          AND memory_a = ${Math.min(nodeA.id, nodeB.id)}
           AND memory_b = ${Math.max(nodeA.id, nodeB.id)}
           AND connection_type = 'semantic'
         LIMIT 1
@@ -827,6 +828,7 @@ async function phaseFreeAssociation(agentId: number): Promise<{
         ];
 
         await db.insert(schema.memorySynapses).values({
+          agentId,
           memoryA: memA,
           memoryB: memB,
           connectionType: "semantic",
@@ -881,12 +883,16 @@ async function phaseFreeAssociation(agentId: number): Promise<{
 
           const existing = await db.execute(sql`
             SELECT id FROM memory_synapses
-            WHERE memory_a = ${memA} AND memory_b = ${memB} AND connection_type = 'semantic'
+            WHERE agent_id = ${agentId}
+              AND memory_a = ${memA}
+              AND memory_b = ${memB}
+              AND connection_type = 'semantic'
             LIMIT 1
           `);
 
           if (existing.rows.length === 0) {
             await db.insert(schema.memorySynapses).values({
+              agentId,
               memoryA: memA,
               memoryB: memB,
               connectionType: "semantic",

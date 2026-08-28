@@ -130,19 +130,46 @@ cp .env.example .env
 # Edit .env with your DATABASE_URL and API keys
 ```
 
-### Docker (Alternative)
+### Docker release stack
+
+The checked-in Compose stack is migration-first and private by default. A one-shot preparation service must finish before any runtime starts. The base configuration publishes only the OAuth gateway, at `127.0.0.1:8091` by default; PostgreSQL, Core REST, MCP, and the dashboard stay private. The legacy OAuth JSON volume is mounted read-only.
+
+Slice 13 is a no-live-mutation release candidate. Memory migration `010` is still mutable and disposable-only under the independent memory plan, so production preparation and rollout remain blocked until that migration is frozen. Do not bypass its guard.
+
+For the current isolated Slice 13 proof:
 
 ```bash
 cp .env.example .env
-# Add your VOYAGE_API_KEY and/or ANTHROPIC_API_KEY
-docker compose up
+# Set four separate database credentials, a unique project/network/volume set,
+# an immutable build ID, public OAuth URLs, the fixed subject/agent binding,
+# secrets, legacy cutoff, and the existing read-only state volume.
+npm run oauth:verify-deployment
+npm run test:oauth:deployment
+npm run test:oauth:integration
+docker compose --project-name cortex-slice13-disposable config >/dev/null
 ```
 
-### Initialize Database
+Do not run the composed migration against production, or weaken the migration-`010` loopback/disposable guard to start the stack. Once the memory plan freezes `010`, the same verified Compose graph becomes the migration-first start path.
+
+The optional admin override publishes the database, Core REST, MCP, and dashboard only on IPv4 loopback:
 
 ```bash
-npx tsx scripts/run-migrations.ts
+docker compose -f docker-compose.yml -f docker-compose.admin.yml --profile admin config
 ```
+
+Use distinct owner/migration, OAuth gateway, OAuth operator, and memory-runtime PostgreSQL logins. The normal gateway never receives owner or operator credentials. `MCP_OAUTH_FRESH_INSTALL=1` is only for a proven new and empty authority; upgrades require the existing JSON state and fail closed when it is absent.
+
+See the [OAuth security deployment and recovery runbook](docs/runbooks/oauth-security.md) before any rollback, database restore, or future production cutover. In particular, a stateless rollback is allowed only before the first v2 token is issued; afterward only the retained DB-aware compatibility image is safe.
+
+### Database migrations
+
+Database DDL belongs to the one-shot migration/preparation phase, never runtime startup. While migration `010` is mutable, exercise it only through the guarded disposable harness:
+
+```bash
+npm run test:oauth:integration
+```
+
+After the memory plan freezes `010` and a production preparation is separately approved, `npm run oauth:prepare` applies the exact ordered migrations, provisions the least-privilege OAuth logins, and verifies the fixed subject/agent binding. It fails closed on a checksum, identity, role, or binding mismatch.
 
 ### Run the MCP Server
 

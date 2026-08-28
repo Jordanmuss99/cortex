@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cortex Memory System</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
+    --muted: #8b949e; --accent: #58a6ff; --warn: #d29922; --crit: #f85149;
+    --ok: #3fb950; --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  .badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge.healthy { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.degraded { background: rgba(210,153,34,.15); color: var(--warn); }
+  .badge.critical { background: rgba(248,81,73,.15); color: var(--crit); }
+  .badge.unknown { background: rgba(139,148,158,.15); color: var(--muted); }
+  .stats { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
+  .stats b { color: var(--text); }
+  #main { display: flex; flex: 1; min-height: 0; }
+  #graph { flex: 1; min-width: 0; }
+  #sidebar { width: 360px; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+  .panel { border-bottom: 1px solid var(--border); padding: 12px 14px; max-height: 45%; overflow-y: auto; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 8px; }
+  .warning { padding: 7px 9px; margin-bottom: 6px; border-radius: 6px; font-size: 12px; border-left: 3px solid; }
+  .warning.warn { background: rgba(210,153,34,.08); border-color: var(--warn); }
+  .warning.critical { background: rgba(248,81,73,.08); border-color: var(--crit); }
+  .warning.info { background: rgba(88,166,255,.06); border-color: var(--accent); }
+  .warning .t { font-weight: 600; display: block; margin-bottom: 2px; }
+  .warning .d { color: var(--muted); line-height: 1.4; }
+  .ok { color: var(--ok); font-size: 12px; padding: 2px 0; }
+  .artifact { padding: 6px 0; border-bottom: 1px solid rgba(48,54,61,.5); font-size: 12px; }
+  .artifact .at { color: var(--muted); font-size: 11px; }
+  .artifact .ty { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--panel); font-size: 10px; margin-right: 6px; color: var(--accent); }
+  .artifact .ct { color: var(--text); margin-top: 3px; line-height: 1.35; max-height: 60px; overflow: hidden; }
+  #tooltip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; font-size: 11px; max-width: 280px; display: none; z-index: 10; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--muted); padding: 4px 14px 0; }
+  .legend span { display: flex; align-items: center; gap: 4px; }
+  .legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  #refresh { margin-left: auto; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  #refresh:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cortex Memory System</h1>
+  <span id="health" class="badge unknown">loading</span>
+  <div class="stats" id="stats"></div>
+  <button id="refresh">Refresh</button>
+</header>
+<div id="main">
+  <div id="graph"></div>
+  <div id="sidebar">
+    <div class="panel">
+      <h2>Vitals</h2>
+      <div id="warnings"></div>
+      <div id="oks"></div>
+    </div>
+    <div class="panel">
+      <h2>Recent Cognition</h2>
+      <div id="artifacts"></div>
+    </div>
+  </div>
+</div>
+<div id="tooltip"></div>
+<div class="legend" id="legend"></div>
+
+<script src="3d-force-graph.min.js"></script>
+<script>
+const CAT_COLORS = {
+  strategic: '#f85149', technical: '#58a6ff', creative: '#bc8cff',
+  operational: '#d29922', research: '#3fb950', communication: '#ff7b72',
+  identity: '#79c0ff', environmental: '#a371f7'
+};
+
+const tooltip = document.getElementById('tooltip');
+let graph;
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return r.json();
+}
+
+function healthBadge(h) {
+  const el = document.getElementById('health');
+  el.className = 'badge ' + (h || 'unknown');
+  el.textContent = h || 'unknown';
+}
+
+function renderStats(s) {
+  document.getElementById('stats').innerHTML = [
+    `<span><b>${s.totalActive}</b> active</span>`,
+    `<span><b>${s.totalSynapses}</b> synapses</span>`,
+    `<span>resonance <b>${s.avgResonance}</b></span>`,
+    `<span><b>${s.totalArchived}</b> archived</span>`,
+  ].join('');
+}
+
+function renderWarnings(warns, oks) {
+  const w = warns.map(x => `<div class="warning ${x.severity}"><span class="t">${x.title}</span><span class="d">${x.detail}</span></div>`).join('');
+  document.getElementById('warnings').innerHTML = w || '<div class="ok">No warnings</div>';
+  document.getElementById('oks').innerHTML = oks.slice(0, 8).map(o => `<div class="ok">✓ ${o}</div>`).join('');
+}
+
+function renderArtifacts(arts) {
+  document.getElementById('artifacts').innerHTML = arts.slice(0, 30).map(a => {
+    const ct = (a.content || '').replace(/"/g,'&quot;').slice(0, 200);
+    return `<div class="artifact"><span class="ty">${a.type}</span><span class="at">${a.created}</span><div class="ct">${ct}</div></div>`;
+  }).join('');
+}
+
+function renderLegend() {
+  document.getElementById('legend').innerHTML = Object.entries(CAT_COLORS)
+    .map(([c,col]) => `<span><i style="background:${col}"></i>${c}</span>`).join('');
+}
+
+function renderGraph(data) {
+  const nodes = data.nodes.map(n => ({
+    id: n.id, cat: n.category, res: n.resonanceScore, pri: n.priority,
+    src: n.sourceType, ent: (n.entities||[]).join(', '),
+    txt: n.content, acc: n.accessCount
+  }));
+  const links = data.synapses.map(s => ({
+    source: s.memoryA, target: s.memoryB,
+    strength: s.connectionStrength, type: s.connectionType
+  }));
+  const nodesById = new Map(nodes.map(n => [n.id, n]));
+
+  if (!graph) {
+    graph = Graph3D()(document.getElementById('graph'))
+      .backgroundColor('#0d1117')
+      .nodeLabel(n => `<b>#${n.id}</b> [${n.cat}] res=${n.res} acc=${n.acc}<br/>${(n.txt||'').slice(0,120)}`)
+      .nodeColor(n => CAT_COLORS[n.cat] || '#8b949e')
+      .nodeVal(n => Math.max(1, Math.min(8, n.res / 2)))
+      .linkColor(() => 'rgba(88,166,255,.15)')
+      .linkWidth(l => l.strength * 2)
+      .linkOpacity(0.3)
+      .linkDirectionalParticles(0)
+      .cooldownTicks(200)
+      .onNodeClick(n => {
+        tooltip.style.display = 'block';
+        tooltip.innerHTML = `<b>#${n.id}</b> [${n.cat}] res=${n.res} pri=P${n.pri} acc=${n.acc}<br/>src: ${n.src}<br/>ent: ${n.ent}<br/><br/>${(n.txt||'').slice(0,200)}`;
+      })
+      .onNodeDragEnd(() => { tooltip.style.display = 'none'; });
+    document.addEventListener('click', e => {
+      if (!e.target.closest('canvas')) tooltip.style.display = 'none';
+    });
+  }
+  graph.graphData({ nodes, links });
+}
+
+async function loadAll() {
+  const agentId = 'arlo';
+  try {
+    const [graphData, vitals, cognition] = await Promise.all([
+      fetchJSON(`/api/v1/graph?agentId=${agentId}&limit=800`),
+      fetchJSON(`/api/v1/vitals?agentId=${agentId}`),
+      fetchJSON(`/api/v1/cognition?agentId=${agentId}`)
+    ]);
+    renderStats(graphData.stats);
+    renderGraph(graphData);
+    renderWarnings(vitals.warnings || [], vitals.okChecks || []);
+    renderArtifacts(cognition.artifacts || []);
+    const sd = cognition.selfDiagnostics;
+    healthBadge(sd ? sd.health : 'unknown');
+  } catch (e) {
+    document.getElementById('warnings').innerHTML = `<div class="warning critical"><span class="t">Load failed</span><span class="d">${e.message}</span></div>`;
+  }
+}
+
+renderLegend();
+document.getElementById('refresh').addEventListener('click', loadAll);
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>

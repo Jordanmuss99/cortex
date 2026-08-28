@@ -12,6 +12,11 @@ interface LLMConfig {
   apiKey: string;
 }
 
+const LLM_TIMEOUT_MS = (() => {
+  const value = Number.parseInt(process.env.CORTEX_LLM_TIMEOUT_MS || "60000", 10);
+  return Number.isSafeInteger(value) && value >= 1000 ? value : 60000;
+})();
+
 export function getConfig(): LLMConfig {
   const provider = (process.env.CORTEX_LLM_PROVIDER || "anthropic") as LLMProvider;
   const model = process.env.CORTEX_LLM_MODEL || getDefaultModel(provider);
@@ -85,7 +90,7 @@ const _openaiClients = new Map<string, OpenAI>();
 
 function getAnthropicClient(apiKey: string): Anthropic {
   if (!_anthropicClient) {
-    _anthropicClient = new Anthropic({ apiKey });
+    _anthropicClient = new Anthropic({ apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1 });
   }
   return _anthropicClient;
 }
@@ -93,7 +98,7 @@ function getAnthropicClient(apiKey: string): Anthropic {
 function getOpenAIClient(apiKey: string, baseURL: string): OpenAI {
   const key = `${baseURL}::${apiKey.slice(0, 8)}`;
   if (!_openaiClients.has(key)) {
-    _openaiClients.set(key, new OpenAI({ apiKey, baseURL }));
+    _openaiClients.set(key, new OpenAI({ apiKey, baseURL, timeout: LLM_TIMEOUT_MS, maxRetries: 1 }));
   }
   return _openaiClients.get(key)!;
 }

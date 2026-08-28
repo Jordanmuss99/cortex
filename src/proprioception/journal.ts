@@ -4,9 +4,15 @@
  * Structured self-state logging for agent introspection.
  */
 import { db, schema } from "../db/index.js";
-import { eq, sql, desc, gte } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
+import { createMemoryServiceDependencies } from "../memory/index.js";
+import { reconcileJournalInTransaction } from "../memory/working-set.js";
+import type {
+  MemoryServiceDependencies,
+  WorkingItem,
+} from "../memory/types.js";
 
-interface JournalEntry {
+export interface JournalEntry {
   energyState?: "high" | "normal" | "low" | "depleted";
   activeThreads?: unknown[];
   confidence?: number;
@@ -14,24 +20,77 @@ interface JournalEntry {
   concerns?: string[];
   notes?: string;
   sessionId?: string;
+  resolvedCallerKeys?: string[];
 }
 
-export async function writeJournalEntry(agentId: number, entry: JournalEntry): Promise<number> {
-  const [inserted] = await db
-    .insert(schema.agentStateLogs)
-    .values({
-      agentId,
-      sessionId: entry.sessionId || null,
-      energyState: entry.energyState || "normal",
-      activeThreads: entry.activeThreads || [],
-      confidence: entry.confidence ?? 0.5,
-      memoryQuality: entry.memoryQuality ?? 0.5,
-      concerns: entry.concerns || [],
-      notes: entry.notes || null,
-    })
-    .returning({ id: schema.agentStateLogs.id });
+export interface JournalWriteResult {
+  journalId: number;
+  workingItems: WorkingItem[];
+}
 
-  return inserted.id;
+const defaultJournalDependencies = createMemoryServiceDependencies();
+
+export async function writeJournalEntry(
+  agentId: number,
+  entry: JournalEntry,
+  deps: MemoryServiceDependencies = defaultJournalDependencies
+): Promise<JournalWriteResult> {
+  const activeThreads = entry.activeThreads ?? [];
+  const concerns = entry.concerns ?? [];
+  const now = deps.now();
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+    throw new TypeError("Journal clock must return a valid instant");
+  }
+  const timestamp = now.toISOString();
+
+  return deps.sql.begin(async (transaction) => {
+    const serializedThreads = JSON.stringify(activeThreads);
+    const inserted = (await transaction`
+      INSERT INTO public.agent_state_logs (
+        agent_id,
+        timestamp,
+        session_id,
+        energy_state,
+        active_threads,
+        confidence,
+        memory_quality,
+        concerns,
+        notes
+      ) VALUES (
+        ${agentId},
+        ${timestamp}::timestamptz,
+        ${entry.sessionId || null},
+        ${entry.energyState || "normal"},
+        ${transaction.typed(serializedThreads, 25)}::jsonb,
+        ${entry.confidence ?? 0.5},
+        ${entry.memoryQuality ?? 0.5},
+        ${transaction.array(concerns)}::text[],
+        ${entry.notes || null}
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number | string }>;
+    if (inserted.length !== 1) {
+      throw new Error("Journal insert did not return one row");
+    }
+
+    const workingItems = await reconcileJournalInTransaction(
+      deps,
+      transaction,
+      agentId,
+      {
+        activeThreads: activeThreads.map(String),
+        concerns,
+        resolvedCallerKeys: entry.resolvedCallerKeys,
+        sessionId: entry.sessionId,
+      },
+      now
+    );
+
+    return {
+      journalId: Number(inserted[0].id),
+      workingItems,
+    };
+  });
 }
 
 export async function getRecentJournal(agentId: number, hours = 24): Promise<Array<{

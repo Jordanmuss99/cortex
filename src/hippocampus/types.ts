@@ -27,6 +27,8 @@ export interface NoveltyResult {
   predictedSimilarity: number;
   /** Sparse-space mismatch score */
   sparseMismatch: number;
+  /** Current same-agent near neighbors surfaced only as update diagnostics */
+  possibleUpdateIds: number[];
 }
 
 /** Full hippocampal encoding output */

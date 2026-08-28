@@ -20,7 +20,9 @@ cd cortex
 npm install
 cp .env.example .env
 # Fill in your DATABASE_URL and at least one embedding API key
-npx tsx scripts/run-migrations.ts
+# Schema-dependent work uses the guarded disposable harness; never point it at
+# a shared or live database.
+npm run test:oauth:integration
 npm test
 ```
 
@@ -29,8 +31,17 @@ npm test
 - TypeScript strict mode
 - No hardcoded API keys, paths, or personal data
 - New features should include tests
-- Database changes go through `initDatabase()` migrations with `IF NOT EXISTS` guards
+- Database changes use ordered, checked-in SQL under `db/migrations/` and the locked/checksummed migration runner; application runtimes never execute DDL
 - MCP tools should have clear descriptions and typed parameters via Zod
+
+## Migration authority and safety
+
+- Schema and privilege changes run only through the one-shot migration/preparation process with a database-owner credential. Core, worker, MCP, cron, OAuth gateway, and operator runtimes must not receive owner credentials or create/alter/drop database objects.
+- Every checked-in migration must be in the required ordered set, pass preflight before any mutation, execute transactionally, and record its exact checksum in the migration ledger. Tests must use the guarded disposable database harness, never a developer or live Cortex database.
+- OAuth migration `009` is immutable at SHA-256 `e0c2de152746cb4b9d3a91710dcf71149062dc53b7b55ff1608f4f8d9b629d80`. Never edit, rename, reorder, or replace it. An OAuth correction must use the next coordinated unused migration number.
+- Memory migration `010` currently has SHA-256 `c41cdcbd0bdef50d673dbb19bbdea47403d4b8e8981c7d2438f6a1ead8789df5`, but remains intentionally mutable and disposable-only until Slice 18 of the independent memory plan. Do not freeze it early, apply it to production, or weaken its exact loopback/database-identity guard.
+- Coordinate migration numbering across the OAuth and memory plans before adding a file. Once a migration has been frozen or applied to production, all later fixes are new forward migrations; checksum history is never rewritten.
+- Keep database credentials separated: owner/migration, OAuth gateway runtime, OAuth operator, and memory runtime are distinct authorities. Tests should assert both the required grants and the forbidden access.
 
 ## Areas We Need Help
 

@@ -1,39 +1,78 @@
+import { pathToFileURL } from "node:url";
 import { watch } from "chokidar";
-import { ingestFile } from "./ingestion/ingest-markdown.js";
-import { ingestTelegramFile } from "./ingestion/ingest-telegram.js";
-import { ingestLimitlessFile } from "./ingestion/ingest-limitless.js";
-import { initDatabase, db, schema } from "./db/index.js";
 import { eq } from "drizzle-orm";
+import { initDatabase, db, schema } from "./db/index.js";
+import {
+  classifyIngestReceipt,
+  submitFileSnapshot,
+  type FileIngestDependencies,
+} from "./ingestion/ingest-markdown.js";
+import { ingestTelegramFileReceipt } from "./ingestion/ingest-telegram.js";
+import { ingestLimitlessFileReceipt } from "./ingestion/ingest-limitless.js";
+import type { IngestReceipt } from "./memory/types.js";
 import "dotenv/config";
 
-const DEBOUNCE_MS = 5 * 60 * 1000; // 5 minutes
-const pendingIngests = new Map<string, NodeJS.Timeout>();
+const DEBOUNCE_MS = 5 * 60 * 1000;
 
-/**
- * File watcher for automatic re-ingestion on changes.
- * Watches the agent workspace memory/ directory and related paths.
- * Debounced at 5 minutes to avoid thrashing.
- */
-async function startWatcher() {
+export function formatWatcherReceipt(
+  filePath: string,
+  receipt: IngestReceipt
+): string {
+  const bucket = classifyIngestReceipt(receipt);
+  if (bucket === "indexed") {
+    return `[watcher] Indexed: ${filePath} (event ${receipt.eventId}, ${receipt.chunksStored} chunks)`;
+  }
+  if (bucket === "rejected") {
+    return receipt.failure?.code === "obsolete_source_snapshot"
+      ? `[watcher] Superseded by a newer snapshot: ${filePath} (event ${receipt.eventId})`
+      : `[watcher] Rejected: ${filePath} (event ${receipt.eventId}, code ${receipt.failure?.code ?? "rejected"})`;
+  }
+  if (bucket === "failed") {
+    return `[watcher] Failed: ${filePath} (event ${receipt.eventId}, code ${receipt.failure?.code ?? "projection_failed"})`;
+  }
+  const retry = receipt.status === "failed" ? ", retry scheduled" : "";
+  return `[watcher] Durably queued: ${filePath} (event ${receipt.eventId}${retry})`;
+}
+
+export async function ingestWatchedFile(
+  agentId: number,
+  filePath: string,
+  dependencies: FileIngestDependencies = {}
+): Promise<IngestReceipt> {
+  const normalized = filePath.replaceAll("\\", "/");
+  if (normalized.includes("/telegram/")) {
+    return ingestTelegramFileReceipt(agentId, filePath, dependencies);
+  }
+  if (normalized.includes("/limitless/")) {
+    return ingestLimitlessFileReceipt(agentId, filePath, dependencies);
+  }
+  return submitFileSnapshot(
+    {
+      agentId,
+      sourcePath: filePath,
+      sourceType: "markdown",
+    },
+    dependencies
+  );
+}
+
+/** File watcher for automatic durable source-snapshot submission. */
+export async function startWatcher(): Promise<void> {
   await initDatabase();
-
+  const pendingIngests = new Map<string, NodeJS.Timeout>();
   const agentExternalId = process.argv[2] || "arlo";
-  const workspace =
-    process.env.CORTEX_WORKSPACE || process.cwd();
+  const workspace = process.env.CORTEX_WORKSPACE || process.cwd();
 
-  // Ensure agent exists
   let [agent] = await db
     .select()
     .from(schema.agents)
     .where(eq(schema.agents.externalId, agentExternalId));
-
   if (!agent) {
     [agent] = await db
       .insert(schema.agents)
       .values({
         externalId: agentExternalId,
-        name:
-          agentExternalId.charAt(0).toUpperCase() + agentExternalId.slice(1),
+        name: agentExternalId.charAt(0).toUpperCase() + agentExternalId.slice(1),
         ownerId: "rez",
       })
       .returning();
@@ -47,7 +86,6 @@ async function startWatcher() {
     `${workspace}/context/limitless`,
     `${workspace}/logs`,
   ];
-
   console.error(`[watcher] Watching for changes (agent: ${agent.name})`);
   console.error(`[watcher] Paths: ${watchPaths.join(", ")}`);
   console.error(`[watcher] Debounce: ${DEBOUNCE_MS / 1000}s`);
@@ -55,65 +93,51 @@ async function startWatcher() {
   const watcher = watch(watchPaths, {
     persistent: true,
     ignoreInitial: true,
-    awaitWriteFinish: {
-      stabilityThreshold: 2000,
-      pollInterval: 100,
-    },
+    followSymlinks: false,
+    awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 100 },
   });
 
-  function queueIngest(filePath: string) {
+  const queueIngest = (filePath: string): void => {
     if (!filePath.endsWith(".md")) return;
-
-    // Clear existing debounce timer for this file
-    if (pendingIngests.has(filePath)) {
-      clearTimeout(pendingIngests.get(filePath)!);
-    }
-
+    const existing = pendingIngests.get(filePath);
+    if (existing) clearTimeout(existing);
     pendingIngests.set(
       filePath,
-      setTimeout(async () => {
+      setTimeout(() => {
         pendingIngests.delete(filePath);
-        console.error(`[watcher] Ingesting: ${filePath}`);
-
-        try {
-          let sourceType = "markdown";
-          if (filePath.includes("/telegram/")) sourceType = "telegram";
-          if (filePath.includes("/limitless/")) sourceType = "limitless";
-
-          if (sourceType === "telegram") {
-            await ingestTelegramFile(agent.id, filePath);
-          } else if (sourceType === "limitless") {
-            await ingestLimitlessFile(agent.id, filePath);
-          } else {
-            await ingestFile({
-              agentId: agent.id,
-              sourcePath: filePath,
-              sourceType,
+        void ingestWatchedFile(agent.id, filePath, { allowedRoot: workspace })
+          .then((receipt) => console.error(formatWatcherReceipt(filePath, receipt)))
+          .catch((error: unknown) => {
+            console.error("[watcher] Snapshot submission failed", {
+              source: filePath,
+              code:
+                error && typeof error === "object" && "code" in error
+                  ? String(error.code)
+                  : "source_snapshot_submission_failed",
             });
-          }
-          console.error(`[watcher] Done: ${filePath}`);
-        } catch (err) {
-          console.error(`[watcher] Error ingesting ${filePath}:`, err);
-        }
+          });
       }, DEBOUNCE_MS)
     );
-
     console.error(
-      `[watcher] Queued: ${filePath} (will ingest in ${DEBOUNCE_MS / 1000}s)`
+      `[watcher] Change detected; debounce scheduled: ${filePath} (${DEBOUNCE_MS / 1000}s)`
     );
-  }
+  };
 
   watcher
     .on("add", queueIngest)
     .on("change", queueIngest)
-    .on("error", (err) => console.error("[watcher] Error:", err));
-
-  // Handle graceful shutdown
+    .on("error", () =>
+      console.error("[watcher] Watch service failed", { code: "watch_service_failed" })
+    );
   process.on("SIGINT", () => {
-    console.error("\n[watcher] Shutting down...");
-    watcher.close();
-    process.exit(0);
+    console.error("[watcher] Shutting down");
+    void watcher.close().finally(() => process.exit(0));
   });
 }
 
-startWatcher();
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  void startWatcher();
+}

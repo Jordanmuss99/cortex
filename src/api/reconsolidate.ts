@@ -22,7 +22,17 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    const result = await reconsolidate(memoryId, newContent, reason);
+    const [agent] = await db
+      .select({ id: schema.agents.id })
+      .from(schema.agents)
+      .where(eq(schema.agents.externalId, agentId))
+      .limit(1);
+    if (!agent) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+
+    const result = await reconsolidate(agent.id, memoryId, newContent, reason);
 
     if (result.status === "not_found") {
       res.status(404).json({ error: "Memory not found", ...result });
