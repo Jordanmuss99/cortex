@@ -152,32 +152,35 @@ export function dgEncode(denseEmbedding: number[]): SparseCode {
 /**
  * Compute sparse overlap between two DG codes.
  *
- * This is the sparse equivalent of cosine similarity:
- * sum of min(a[i], b[i]) for shared active indices.
+ * Uses L2 dot product normalized by Cauchy-Schwarz support asymmetry
+ * sqrt(min(|a|, |b|) / max(|a|, |b|)), so symmetric K=204 codes equal
+ * exact L2 cosine similarity in [0, 1] (with sparseOverlap(v, v) === 1.0)
+ * and short query codes scale cleanly in [0, 1].
  *
- * Since both vectors are L2-normalized, this is bounded [0, 1].
- *
- * @returns Overlap score in [0, 1]
+ * @returns Overlap score strictly in [0, 1]
  */
 export function sparseOverlap(a: SparseCode, b: SparseCode): number {
-  // Build a map for the smaller code
-  const [smaller, larger] =
-    a.indices.length <= b.indices.length ? [a, b] : [b, a];
+  const la = a.indices.length;
+  const lb = b.indices.length;
+  if (la === 0 || lb === 0) return 0;
+
+  const [smaller, larger] = la <= lb ? [a, b] : [b, a];
 
   const map = new Map<number, number>();
   for (let i = 0; i < smaller.indices.length; i++) {
     map.set(smaller.indices[i], smaller.values[i]);
   }
 
-  let overlap = 0;
+  let dot = 0;
   for (let i = 0; i < larger.indices.length; i++) {
     const val = map.get(larger.indices[i]);
     if (val !== undefined) {
-      overlap += Math.min(val, larger.values[i]);
+      dot += val * larger.values[i];
     }
   }
 
-  return overlap;
+  const asymScale = la === lb ? 1.0 : Math.sqrt(Math.min(la, lb) / Math.max(la, lb));
+  return Math.min(1.0, Math.max(0.0, dot / (asymScale || 1.0)));
 }
 
 /**

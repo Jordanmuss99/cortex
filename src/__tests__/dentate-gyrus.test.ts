@@ -60,18 +60,20 @@ describe("Dentate Gyrus — Pattern Separation", () => {
   });
 
   describe("sparseOverlap", () => {
-    it("should return maximum overlap for identical codes", () => {
+    it("should return 1.0 (bounded in [0, 1]) for identical codes", () => {
       const emb = makeEmbedding(42);
       const code = dgEncode(emb);
       const selfOverlap = sparseOverlap(code, code);
 
-      // Self-overlap is the sum of all values (since min(v,v)=v for each index)
-      // This should be the maximum possible overlap for this code
-      expect(selfOverlap).toBeGreaterThan(0);
+      // L2 dot product of normalized sparse vector with itself is 1.0
+      expect(selfOverlap).toBeCloseTo(1.0, 5);
+      expect(selfOverlap).toBeLessThanOrEqual(1.0);
 
-      // Any other code should have strictly less overlap
+      // Any other code should have strictly less overlap in [0, 1)
       const other = dgEncode(makeEmbedding(999));
-      expect(sparseOverlap(code, other)).toBeLessThan(selfOverlap);
+      const cross = sparseOverlap(code, other);
+      expect(cross).toBeGreaterThanOrEqual(0);
+      expect(cross).toBeLessThan(selfOverlap);
     });
 
     it("should return lower overlap for dissimilar inputs than identical", () => {

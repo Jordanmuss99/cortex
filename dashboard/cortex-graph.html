@@ -1,0 +1,2135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CORTEX v2.6 — 3D Hippocampal Memory Visualizer (OmO Native)</title>
+  <style>
+    :root {
+      --bg-void: #050811;
+      --bg-panel: rgba(11, 16, 30, 0.86);
+      --bg-card: rgba(17, 24, 44, 0.78);
+      --bg-card-hover: rgba(25, 35, 62, 0.92);
+      --bg-input: rgba(8, 12, 24, 0.9);
+      --border-subtle: rgba(148, 163, 184, 0.14);
+      --border-strong: rgba(56, 189, 248, 0.38);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-cyan: #38bdf8;
+      --accent-violet: #a855f7;
+      --accent-gold: #facc15;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #f43f5e;
+      --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg-void);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .app-shell {
+      display: flex;
+      flex-direction: column;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* ─── Top Command Bar ─── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 10px 16px;
+      background: rgba(8, 12, 23, 0.94);
+      border-bottom: 1px solid var(--border-subtle);
+      backdrop-filter: blur(16px);
+      z-index: 30;
+      flex-shrink: 0;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand-orb {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      background: radial-gradient(circle at 32% 30%, #38bdf8, #6366f1 58%, #0f172a 100%);
+      box-shadow: 0 0 18px rgba(56, 189, 248, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-weight: 800;
+      font-size: 13px;
+      color: #ffffff;
+      flex-shrink: 0;
+    }
+
+    .brand-title {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .brand-title h1 {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .badge-3d {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(168, 85, 247, 0.25));
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      color: #7dd3fc;
+    }
+
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      white-space: nowrap;
+    }
+
+    .health-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      background: rgba(16, 185, 129, 0.12);
+      color: #34d399;
+      white-space: nowrap;
+    }
+
+    .health-pill.degraded {
+      border-color: rgba(245, 158, 11, 0.4);
+      background: rgba(245, 158, 11, 0.12);
+      color: #fbbf24;
+    }
+
+    .health-pill.critical {
+      border-color: rgba(244, 63, 94, 0.45);
+      background: rgba(244, 63, 94, 0.14);
+      color: #fb7185;
+    }
+
+    .health-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+    }
+
+    .top-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1;
+      justify-content: center;
+      max-width: 760px;
+    }
+
+    .select-wrap, .search-wrap {
+      display: flex;
+      align-items: center;
+    }
+
+    select.agent-select {
+      background: var(--bg-input);
+      color: var(--text-primary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 7px;
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 500;
+      outline: none;
+      cursor: pointer;
+      min-width: 245px;
+      transition: border-color 0.15s ease;
+    }
+
+    select.agent-select:hover, select.agent-select:focus {
+      border-color: var(--accent-cyan);
+    }
+
+    .search-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 220px;
+    }
+
+    .search-input {
+      width: 100%;
+      background: var(--bg-input);
+      color: var(--text-primary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 7px;
+      padding: 7px 78px 7px 12px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+    }
+
+    .search-btn {
+      position: absolute;
+      right: 4px;
+      top: 4px;
+      bottom: 4px;
+      padding: 0 11px;
+      background: linear-gradient(135deg, #0284c7, #4f46e5);
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .search-btn:hover {
+      opacity: 0.92;
+    }
+
+    .btn-ghost {
+      background: rgba(30, 41, 59, 0.65);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 7px;
+      padding: 6px 11px;
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+
+    .btn-ghost:hover {
+      color: var(--text-primary);
+      border-color: rgba(148, 163, 184, 0.35);
+      background: rgba(51, 65, 85, 0.72);
+    }
+
+    .kpi-strip {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .kpi-item {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      line-height: 1.15;
+    }
+
+    .kpi-val {
+      font-family: var(--font-mono);
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .kpi-val.cyan { color: var(--accent-cyan); }
+    .kpi-val.gold { color: var(--accent-gold); }
+    .kpi-val.violet { color: #c084fc; }
+    .kpi-val.amber { color: #fb923c; }
+
+    .kpi-lbl {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    /* ─── Main Workspace Split ─── */
+    .workspace {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      position: relative;
+    }
+
+    /* ─── 3D WebGL Viewport ─── */
+    .viewport-3d {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      height: 100%;
+      background: radial-gradient(circle at 50% 48%, #0a1126 0%, #050811 72%);
+      overflow: hidden;
+    }
+
+    #graph {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* HUD Overlays inside 3D Viewport */
+    .hud-top-left {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 15;
+      pointer-events: none;
+    }
+
+    .hud-card {
+      pointer-events: auto;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 8px 11px;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    }
+
+    .hud-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .hud-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-right: 4px;
+    }
+
+    .pill-btn {
+      background: rgba(15, 23, 42, 0.78);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+
+    .pill-btn:hover {
+      color: var(--text-primary);
+      border-color: rgba(148, 163, 184, 0.35);
+    }
+
+    .pill-btn.active {
+      background: rgba(56, 189, 248, 0.18);
+      color: #7dd3fc;
+      border-color: rgba(56, 189, 248, 0.52);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.16);
+    }
+
+    .slider-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    input[type="range"] {
+      accent-color: var(--accent-cyan);
+      width: 96px;
+      cursor: pointer;
+    }
+
+    .hud-top-right {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      z-index: 15;
+      display: flex;
+      gap: 6px;
+    }
+
+    .hud-bottom-left {
+      position: absolute;
+      bottom: 14px;
+      left: 14px;
+      z-index: 15;
+      max-width: 390px;
+    }
+
+    .legend-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      margin-top: 5px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .legend-item:hover {
+      color: var(--text-primary);
+    }
+
+    .legend-swatch {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      box-shadow: 0 0 7px currentColor;
+    }
+
+    .hud-bottom-right {
+      position: absolute;
+      bottom: 14px;
+      right: 14px;
+      z-index: 15;
+      max-width: 440px;
+    }
+
+    .entity-bar {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+
+    .entity-chip {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      color: #cbd5e1;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+
+    .entity-chip:hover {
+      border-color: var(--accent-cyan);
+      color: #7dd3fc;
+      background: rgba(56, 189, 248, 0.14);
+    }
+
+    .spotlight-banner {
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 16;
+      background: rgba(14, 22, 43, 0.92);
+      border: 1px solid rgba(56, 189, 248, 0.48);
+      border-radius: 999px;
+      padding: 6px 14px;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      font-size: 11.5px;
+      color: #e0f2fe;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(12px);
+    }
+
+    .spotlight-banner.visible {
+      display: inline-flex;
+    }
+
+    /* ─── Right Cognitive Sidebar ─── */
+    .sidebar {
+      width: 430px;
+      flex-shrink: 0;
+      height: 100%;
+      background: rgba(9, 13, 25, 0.96);
+      border-left: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      z-index: 20;
+    }
+
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-bottom: 1px solid var(--border-subtle);
+      background: rgba(6, 9, 19, 0.9);
+      flex-shrink: 0;
+    }
+
+    .tab-btn {
+      padding: 11px 8px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-secondary);
+    }
+
+    .tab-btn.active {
+      color: var(--accent-cyan);
+      border-bottom-color: var(--accent-cyan);
+      background: rgba(56, 189, 248, 0.06);
+    }
+
+    .tab-pane {
+      display: none;
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      gap: 12px;
+      flex-direction: column;
+    }
+
+    .tab-pane.active {
+      display: flex;
+    }
+
+    .tab-pane::-webkit-scrollbar {
+      width: 6px;
+    }
+    .tab-pane::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.22);
+      border-radius: 3px;
+    }
+
+    .panel-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+    }
+
+    .panel-title {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .meta-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tag {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(30, 41, 59, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      color: #cbd5e1;
+    }
+
+    .tag.p1 {
+      background: rgba(250, 204, 21, 0.14);
+      border-color: rgba(250, 204, 21, 0.42);
+      color: #fde047;
+    }
+
+    .tag.p2 {
+      background: rgba(56, 189, 248, 0.14);
+      border-color: rgba(56, 189, 248, 0.38);
+      color: #7dd3fc;
+    }
+
+    .tag.p3 {
+      background: rgba(100, 116, 139, 0.2);
+      border-color: rgba(100, 116, 139, 0.4);
+      color: #94a3b8;
+    }
+
+    .tag.labile {
+      background: rgba(249, 115, 22, 0.18);
+      border-color: rgba(249, 115, 22, 0.5);
+      color: #fdba74;
+    }
+
+    .neuron-content {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #e2e8f0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(6, 10, 20, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 7px;
+      padding: 10px;
+      max-height: 250px;
+      overflow-y: auto;
+      font-family: var(--font-sans);
+    }
+
+    .bars-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 7px 12px;
+    }
+
+    .bar-row {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .bar-head {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--text-secondary);
+    }
+
+    .bar-track {
+      height: 5px;
+      background: rgba(30, 41, 59, 0.9);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: linear-gradient(90deg, #38bdf8, #818cf8);
+      transition: width 0.25s ease;
+    }
+
+    .synapse-list, .result-list, .feed-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .synapse-item, .result-card {
+      background: rgba(11, 17, 32, 0.84);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+
+    .synapse-item:hover, .result-card:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-card-hover);
+    }
+
+    .synapse-top, .result-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 4px;
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+    }
+
+    .synapse-preview, .result-preview {
+      font-size: 11.5px;
+      color: #cbd5e1;
+      line-height: 1.42;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .score-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 6px;
+    }
+
+    .score-chip {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(15, 23, 42, 0.92);
+      color: var(--text-secondary);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+
+    .score-chip.qualified {
+      color: #34d399;
+      border-color: rgba(16, 185, 129, 0.4);
+      background: rgba(16, 185, 129, 0.1);
+    }
+
+    textarea.form-textarea, input.form-input {
+      width: 100%;
+      background: var(--bg-input);
+      color: var(--text-primary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 7px;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-family: var(--font-sans);
+      resize: vertical;
+      outline: none;
+    }
+
+    textarea.form-textarea:focus, input.form-input:focus {
+      border-color: var(--accent-cyan);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #6366f1);
+      color: #ffffff;
+      border: none;
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s ease;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.92;
+    }
+
+    .status-msg {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      display: none;
+      line-height: 1.4;
+    }
+
+    .status-msg.ok {
+      display: block;
+      background: rgba(16, 185, 129, 0.13);
+      border: 1px solid rgba(16, 185, 129, 0.38);
+      color: #6ee7b7;
+    }
+
+    .status-msg.warn {
+      display: block;
+      background: rgba(245, 158, 11, 0.14);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      color: #fcd34d;
+    }
+
+    .status-msg.err {
+      display: block;
+      background: rgba(244, 63, 94, 0.14);
+      border: 1px solid rgba(244, 63, 94, 0.4);
+      color: #fda4af;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 11.8px;
+      line-height: 1.45;
+      color: #cbd5e1;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .check-icon {
+      font-family: var(--font-mono);
+      font-weight: 700;
+      color: #34d399;
+      flex-shrink: 0;
+    }
+
+    .check-row.warn {
+      border-color: rgba(245, 158, 11, 0.35);
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .check-row.warn .check-icon {
+      color: #fbbf24;
+    }
+
+    .feed-item {
+      padding: 8px 9px;
+      border-radius: 7px;
+      background: rgba(12, 18, 34, 0.78);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      font-size: 11.5px;
+      line-height: 1.42;
+    }
+
+    .feed-head {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 3px;
+    }
+
+    .empty-hint {
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.5;
+      text-align: center;
+      padding: 20px 10px;
+    }
+
+    /* 3D Node Hover Tooltip */
+    .node-tooltip {
+      background: rgba(8, 13, 26, 0.95);
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      border-radius: 8px;
+      padding: 8px 10px;
+      max-width: 320px;
+      color: #f1f5f9;
+      font-family: var(--font-sans);
+      font-size: 11.5px;
+      line-height: 1.4;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.65);
+    }
+
+    .node-tooltip-head {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: #7dd3fc;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(5, 8, 17, 0.82);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      z-index: 25;
+      font-family: var(--font-mono);
+      color: #7dd3fc;
+      transition: opacity 0.25s ease;
+    }
+
+    .loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Command Bar -->
+    <header class="topbar">
+      <div class="brand-group">
+        <div class="brand-orb">CX</div>
+        <div class="brand-title">
+          <h1>CORTEX v2.6 <span class="badge-3d">3D WebGL</span></h1>
+          <div class="brand-sub">4096-dim DG k-WTA &bull; Kuramoto Upgrade-K &bull; Lyapunov P1 Floor &bull; Federated</div>
+        </div>
+        <div id="healthPill" class="health-pill">
+          <span class="health-dot"></span>
+          <span id="healthText">HEALTHY</span>
+        </div>
+      </div>
+
+      <div class="top-controls">
+        <div class="select-wrap">
+          <select id="agentSelect" class="agent-select" autocomplete="off" title="Select OmO Memory Workspace">
+            <option value="all">Loading workspaces...</option>
+          </select>
+        </div>
+        <form id="searchForm" class="search-wrap">
+          <input
+            id="searchInput"
+            class="search-input"
+            type="text"
+            placeholder="6-factor hybrid recall (e.g. SacsRecorder boundary, Lyapunov, cache-keepalive)..."
+            autocomplete="off"
+          />
+          <button type="submit" class="search-btn">Recall 3D</button>
+        </form>
+        <button id="resetBtn" type="button" class="btn-ghost" title="Clear spotlight and fit full 3D brain">Reset View</button>
+      </div>
+
+      <div class="kpi-strip">
+        <div class="kpi-item">
+          <span id="kpiNeurons" class="kpi-val cyan">0</span>
+          <span class="kpi-lbl">Neurons</span>
+        </div>
+        <div class="kpi-item">
+          <span id="kpiSynapses" class="kpi-val">0</span>
+          <span class="kpi-lbl">DG Synapses</span>
+        </div>
+        <div class="kpi-item">
+          <span id="kpiBridges" class="kpi-val violet">0</span>
+          <span class="kpi-lbl">Cross-Agent</span>
+        </div>
+        <div class="kpi-item">
+          <span id="kpiRulings" class="kpi-val gold">0</span>
+          <span class="kpi-lbl">P1 Rulings</span>
+        </div>
+        <div class="kpi-item">
+          <span id="kpiLabile" class="kpi-val amber">0</span>
+          <span class="kpi-lbl">Labile (1h)</span>
+        </div>
+        <div class="kpi-item">
+          <span id="kpiResonance" class="kpi-val">0.0</span>
+          <span class="kpi-lbl">Avg Res</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Split: 3D WebGL Brain + Cognitive Control Sidebar -->
+    <div class="workspace">
+      <div class="viewport-3d" id="viewport3d">
+        <div id="graph"></div>
+
+        <div id="loadingOverlay" class="loading-overlay">
+          <div>Synthesizing 3D Dentate Gyrus Sparse Projections...</div>
+        </div>
+
+        <div id="spotlightBanner" class="spotlight-banner">
+          <span id="spotlightText">Active Ensembles Highlighted</span>
+          <button id="clearSpotlightBtn" type="button" class="pill-btn">Clear</button>
+        </div>
+
+        <!-- Top-Left 3D Lens & Synapse Controls -->
+        <div class="hud-top-left">
+          <div class="hud-card">
+            <div class="hud-row">
+              <span class="hud-label">3D Color Lens</span>
+              <button type="button" class="pill-btn active" data-lens="category">Category</button>
+              <button type="button" class="pill-btn" data-lens="provenance">Provenance</button>
+              <button type="button" class="pill-btn" data-lens="workspace">Workspace</button>
+              <button type="button" class="pill-btn" data-lens="valence">Valence / Labile</button>
+              <button type="button" class="pill-btn" data-lens="kuramoto">Kuramoto Phase</button>
+            </div>
+          </div>
+
+          <div class="hud-card">
+            <div class="hud-row">
+              <span class="hud-label">Tier Filter</span>
+              <button type="button" class="pill-btn active" data-tier="all">All</button>
+              <button type="button" class="pill-btn" data-tier="p1">P1 Only</button>
+              <button type="button" class="pill-btn" data-tier="p1p2">P1 + P2</button>
+              <button type="button" class="pill-btn" data-tier="labile">Labile</button>
+              <button type="button" class="pill-btn" data-tier="bridges">Bridges</button>
+            </div>
+          </div>
+
+          <div class="hud-card">
+            <div class="hud-row">
+              <div class="slider-group">
+                <span class="hud-label">Min DG Cosine</span>
+                <input id="synapseSlider" type="range" min="0.16" max="0.52" step="0.02" value="0.22" />
+                <span id="synapseVal">0.22</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top-Right 3D Camera & Particle Controls -->
+        <div class="hud-top-right">
+          <button id="orbitBtn" type="button" class="pill-btn active" title="Toggle continuous 3D camera orbit">Auto-Orbit 3D</button>
+          <button id="pulsesBtn" type="button" class="pill-btn active" title="Toggle directional synaptic pulse particles">Synaptic Pulses</button>
+          <button id="fitBtn" type="button" class="pill-btn" title="Zoom 3D camera to fit all visible neurons">Fit 3D</button>
+        </div>
+
+        <!-- Bottom-Left Dynamic Color Legend -->
+        <div class="hud-bottom-left">
+          <div class="hud-card">
+            <div class="hud-label" id="legendTitle">Active Lens: Semantic Category</div>
+            <div id="legendGrid" class="legend-grid"></div>
+          </div>
+        </div>
+
+        <!-- Bottom-Right Top Entities Quick Recall -->
+        <div class="hud-bottom-right">
+          <div class="hud-card">
+            <div class="hud-label" style="margin-bottom:5px;">High-Frequency Engram Symbols (Click to 3D Recall)</div>
+            <div id="entityBar" class="entity-bar"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Tabbed Sidebar -->
+      <aside class="sidebar">
+        <div class="tabs">
+          <button type="button" class="tab-btn active" data-tab="inspector">Neuron Inspector</button>
+          <button type="button" class="tab-btn" data-tab="recall">Recall &amp; Ingest</button>
+          <button type="button" class="tab-btn" data-tab="vitals">Vitals &amp; Feed</button>
+        </div>
+
+        <!-- TAB 1: Neuron Inspector & Reconsolidation -->
+        <div id="tab-inspector" class="tab-pane active">
+          <div id="inspectorEmpty" class="panel-card">
+            <div class="empty-hint">
+              <strong>Click any 3D neuron sphere</strong> (or run a 6-factor recall query above) to fly the WebGL camera into its local hippocampal circuit, inspect its 4096-dim DG sparsity &amp; 6D valence vector, or trigger Labile Reconsolidation.
+            </div>
+          </div>
+
+          <div id="inspectorDetail" style="display:none; flex-direction:column; gap:12px;">
+            <div class="panel-card">
+              <div class="panel-title">
+                <span id="inspHeaderId">NEURON #0</span>
+                <button id="flyNodeBtn" type="button" class="pill-btn">Fly Camera</button>
+              </div>
+              <div id="inspTags" class="meta-tags"></div>
+              <div id="inspSource" style="font-family:var(--font-mono); font-size:11px; color:#7dd3fc; word-break:break-all;"></div>
+              <div id="inspContent" class="neuron-content"></div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-title">
+                <span>6D Amygdala Valence &amp; DG Sparsity</span>
+                <span id="inspDgBadge" style="color:#38bdf8;">204 / 4096 k-WTA</span>
+              </div>
+              <div id="inspValenceBars" class="bars-grid"></div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-title">
+                <span>Connected DG Synapses (1-Hop Circuit)</span>
+                <span id="inspDegree">0 links</span>
+              </div>
+              <div id="inspSynapses" class="synapse-list"></div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-title">
+                <span>Labile Reconsolidation (Supersede &amp; Audit)</span>
+              </div>
+              <textarea id="reconTextarea" class="form-textarea" rows="4" placeholder="Updated factual belief..."></textarea>
+              <button id="reconBtn" type="button" class="btn-primary">Reconsolidate Memory</button>
+              <div id="reconStatus" class="status-msg"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 2: 6-Factor Hybrid Recall & CA1 Novelty Ingest -->
+        <div id="tab-recall" class="tab-pane">
+          <div class="panel-card">
+            <div class="panel-title">
+              <span>6-Factor Hybrid Recall Results</span>
+              <span id="searchLatency" style="color:#38bdf8;">Gate &ge; 0.34</span>
+            </div>
+            <div id="searchResultsList" class="result-list">
+              <div class="empty-hint">Run a query in the top bar or click an entity chip to visualize 6-factor DG + BM25 + Valence recall in 3D.</div>
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-title">
+              <span>CA1 Novelty-Gated Ingest (0.88 Duplicate Gate)</span>
+            </div>
+            <input id="ingestSource" class="form-input" type="text" value="dashboard-ruling" placeholder="Source label (e.g. user-ruling)" />
+            <textarea id="ingestContent" class="form-textarea" rows="4" placeholder="Enter novel architectural fact or user ruling to encode into 4096-dim DG space..."></textarea>
+            <button id="ingestBtn" type="button" class="btn-primary">Encode &amp; Gate via CA1</button>
+            <div id="ingestStatus" class="status-msg"></div>
+          </div>
+        </div>
+
+        <!-- TAB 3: Vitals, OmO Peer Mesh & Cognition Feed -->
+        <div id="tab-vitals" class="tab-pane">
+          <div class="panel-card">
+            <div class="panel-title">
+              <span>Hippocampal &amp; OmO Mesh Vitals</span>
+              <button id="refreshVitalsBtn" type="button" class="pill-btn">Refresh</button>
+            </div>
+            <div id="vitalsList" class="feed-list"></div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-title">
+              <span>Active Labile Window (1h Recall Plasticity)</span>
+              <span id="labileFeedCount">0</span>
+            </div>
+            <div id="labileList" class="feed-list"></div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-title">
+              <span>Cognition &amp; OmO Runtime Receipts</span>
+            </div>
+            <div id="cognitionFeed" class="feed-list"></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="/3d-force-graph.min.js"></script>
+  <script>
+    (() => {
+      // ─── Color Palettes for the 4 3D Lenses ───
+      const CATEGORY_COLORS = {
+        technical: "#38bdf8",
+        strategic: "#a855f7",
+        operational: "#f59e0b",
+        research: "#2dd4bf",
+        identity: "#f43f5e",
+        communication: "#818cf8",
+        creative: "#ec4899",
+        environmental: "#22c55e",
+      };
+
+      const PROVENANCE_COLORS = {
+        user_ruling: "#facc15",
+        iron_law: "#f43f5e",
+        claude_memory: "#a78bfa",
+        openwiki: "#2dd4bf",
+        audit: "#fbbf24",
+        ace_playbook: "#4ade80",
+        reference: "#38bdf8",
+        reconsolidated: "#c084fc",
+        custom: "#34d399",
+        skill: "#fb923c",
+        fact: "#60a5fa",
+        agent_tentative: "#64748b",
+      };
+
+      const WORKSPACE_PALETTE = [
+        "#38bdf8", "#a855f7", "#f59e0b", "#10b981",
+        "#f43f5e", "#eab308", "#2dd4bf", "#818cf8",
+      ];
+
+      const SYNAPSE_COLORS = {
+        ca3_strong_engram: "rgba(56, 189, 248, 0.72)",
+        cross_agent_bridge: "rgba(250, 204, 21, 0.78)",
+        episodic_sibling: "rgba(148, 163, 184, 0.36)",
+        hippocampal_dg: "rgba(129, 140, 248, 0.44)",
+      };
+
+      // ─── Dashboard State ───
+      const state = {
+        agentId: "all",
+        agents: [],
+        rawNodes: [],
+        rawSynapses: [],
+        visibleNodes: [],
+        visibleLinks: [],
+        nodeById: new Map(),
+        neighborsById: new Map(), // id -> Array<{ peerId, synapse }>
+        workspaceColorMap: new Map(),
+        activeLens: "category",
+        tierFilter: "all",
+        legendFilter: null,
+        minSynapse: 0.22,
+        autoOrbit: true,
+        synapticPulses: true,
+        selectedNodeId: null,
+        searchHighlightIds: new Set(),
+        searchScoresById: new Map(),
+        activeSpotlightIds: new Set(), // union of selected + 1-hop OR search hits
+      };
+
+      // ─── DOM Elements ───
+      const elGraph = document.getElementById("graph");
+      const elViewport = document.getElementById("viewport3d");
+      const elLoading = document.getElementById("loadingOverlay");
+      const elAgentSelect = document.getElementById("agentSelect");
+      const elSearchForm = document.getElementById("searchForm");
+      const elSearchInput = document.getElementById("searchInput");
+      const elResetBtn = document.getElementById("resetBtn");
+      const elSpotlightBanner = document.getElementById("spotlightBanner");
+      const elSpotlightText = document.getElementById("spotlightText");
+      const elClearSpotlightBtn = document.getElementById("clearSpotlightBtn");
+      const elSynapseSlider = document.getElementById("synapseSlider");
+      const elSynapseVal = document.getElementById("synapseVal");
+      const elOrbitBtn = document.getElementById("orbitBtn");
+      const elPulsesBtn = document.getElementById("pulsesBtn");
+      const elFitBtn = document.getElementById("fitBtn");
+      const elLegendTitle = document.getElementById("legendTitle");
+      const elLegendGrid = document.getElementById("legendGrid");
+      const elEntityBar = document.getElementById("entityBar");
+
+      function escapeHtml(str) {
+        return String(str ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function workspaceColor(slug) {
+        if (!state.workspaceColorMap.has(slug)) {
+          const idx = state.workspaceColorMap.size % WORKSPACE_PALETTE.length;
+          state.workspaceColorMap.set(slug, WORKSPACE_PALETTE[idx]);
+        }
+        return state.workspaceColorMap.get(slug);
+      }
+
+      function kuramotoQuadrant(node) {
+        const k = node.kuramoto;
+        if (!k || !k.valid) return "masked";
+        const th = Number(k.theta || 0);
+        if (th >= 0 && th < Math.PI / 2) return "q1";
+        if (th >= Math.PI / 2) return "q2";
+        if (th < -Math.PI / 2) return "q3";
+        return "q4";
+      }
+
+      const KURAMOTO_COLORS = {
+        q1: "#38bdf8",
+        q2: "#a855f7",
+        q3: "#f43f5e",
+        q4: "#10b981",
+        masked: "#475569",
+      };
+
+      function baseNodeColor(node) {
+        if (state.activeLens === "category") {
+          return CATEGORY_COLORS[node.category] || "#38bdf8";
+        }
+        if (state.activeLens === "provenance") {
+          return PROVENANCE_COLORS[node.provenance] || "#60a5fa";
+        }
+        if (state.activeLens === "workspace") {
+          return workspaceColor(node.agentSlug);
+        }
+        if (state.activeLens === "kuramoto") {
+          return KURAMOTO_COLORS[kuramotoQuadrant(node)] || "#475569";
+        }
+        // Valence & Labile lens
+        if (node.isLabile) return "#f97316";
+        if (node.emotionalBoost >= 0.48 || (node.valence && node.valence.intensity >= 0.35)) return "#f43f5e";
+        if (node.valence && node.valence.valence > 0.08) return "#10b981";
+        return "#3b82f6";
+      }
+
+      function computeNodeColor(node) {
+        const hasSpotlight = state.activeSpotlightIds.size > 0;
+        if (!hasSpotlight) {
+          return baseNodeColor(node);
+        }
+        if (state.selectedNodeId === node.id) {
+          return "#fde047";
+        }
+        if (state.searchHighlightIds.has(node.id)) {
+          return "#38bdf8";
+        }
+        if (state.activeSpotlightIds.has(node.id)) {
+          return baseNodeColor(node);
+        }
+        return "rgba(45, 62, 92, 0.16)";
+      }
+
+      function computeNodeVal(node) {
+        const pBoost = node.priority === 1 ? 3.2 : node.priority === 2 ? 1.8 : 1.0;
+        const degBoost = Math.min(4.5, (node.synapseDegree || 0) * 0.42);
+        const resBoost = Math.max(0.5, (node.resonanceScore || 5) * 0.28);
+        let v = pBoost + degBoost + resBoost;
+        if (state.selectedNodeId === node.id) v *= 1.55;
+        else if (state.searchHighlightIds.has(node.id)) v *= 1.35;
+        else if (node.isLabile) v *= 1.25;
+        return v;
+      }
+
+      function endId(endpoint) {
+        return typeof endpoint === "object" && endpoint !== null ? endpoint.id : endpoint;
+      }
+
+      function isLinkHighlighted(link) {
+        if (state.activeSpotlightIds.size === 0) return false;
+        const a = endId(link.source);
+        const b = endId(link.target);
+        if (state.selectedNodeId) {
+          return a === state.selectedNodeId || b === state.selectedNodeId;
+        }
+        return state.searchHighlightIds.has(a) && state.searchHighlightIds.has(b);
+      }
+
+      function computeLinkColor(link) {
+        if (state.activeSpotlightIds.size > 0) {
+          if (isLinkHighlighted(link)) {
+            return link.connectionType === "cross_agent_bridge" ? "#facc15" : "#38bdf8";
+          }
+          return "rgba(30, 41, 59, 0.08)";
+        }
+        return SYNAPSE_COLORS[link.connectionType] || SYNAPSE_COLORS.hippocampal_dg;
+      }
+
+      function computeLinkWidth(link) {
+        const base = Math.max(0.4, (link.connectionStrength - 0.14) * 3.8);
+        if (isLinkHighlighted(link)) return base * 2.1 + 0.7;
+        if (state.activeSpotlightIds.size > 0) return 0.25;
+        return base;
+      }
+
+      function computeLinkParticles(link) {
+        if (!state.synapticPulses) return 0;
+        if (state.activeSpotlightIds.size > 0) {
+          return isLinkHighlighted(link) ? 4 : 0;
+        }
+        if (link.connectionType === "cross_agent_bridge") return 2;
+        if (link.connectionStrength >= 0.46) return 2;
+        return 0;
+      }
+
+      // ─── Initialize True 3D WebGL ForceGraph3D ───
+      if (typeof window.ForceGraph3D !== "function") {
+        elLoading.innerHTML = "<div style='color:#fb7185'>Fatal: window.ForceGraph3D bundle did not load.</div>";
+        return;
+      }
+
+      const graph = window.ForceGraph3D()(elGraph)
+        .backgroundColor("#050811")
+        .showNavInfo(false)
+        .nodeId("id")
+        .nodeResolution(24)
+        .nodeOpacity(0.93)
+        .nodeVal(computeNodeVal)
+        .nodeColor(computeNodeColor)
+        .nodeLabel((n) => {
+          const scoreTag = state.searchScoresById.has(n.id)
+            ? ` &bull; Recall=${state.searchScoresById.get(n.id).toFixed(3)}`
+            : "";
+          return `<div class="node-tooltip">
+            <div class="node-tooltip-head">
+              <span>${escapeHtml(n.agentLabel)} #${escapeHtml(n.numericId)}</span>
+              <span>P${escapeHtml(n.priority)} &bull; ${escapeHtml(n.provenance)}${scoreTag}</span>
+            </div>
+            <div style="color:#94a3b8;font-family:monospace;font-size:10px;margin-bottom:4px;">${escapeHtml(n.source)}</div>
+            <div>${escapeHtml(n.preview)}${n.content.length > 220 ? "..." : ""}</div>
+          </div>`;
+        })
+        .linkColor(computeLinkColor)
+        .linkWidth(computeLinkWidth)
+        .linkOpacity(0.68)
+        .linkCurvature((l) => (l.connectionType === "cross_agent_bridge" ? 0.24 : 0.05))
+        .linkDirectionalParticles(computeLinkParticles)
+        .linkDirectionalParticleWidth(2.1)
+        .linkDirectionalParticleSpeed((l) => 0.0035 + l.connectionStrength * 0.006)
+        .linkDirectionalParticleColor((l) =>
+          l.connectionType === "cross_agent_bridge" ? "#fde047" : "#7dd3fc"
+        )
+        .d3AlphaDecay(0.026)
+        .d3VelocityDecay(0.34)
+        .warmupTicks(40)
+        .cooldownTicks(130)
+        .onNodeClick((node) => {
+          if (!node) return;
+          selectNeuron(node.id, { fly: true, switchTab: true });
+        })
+        .onBackgroundClick(() => {
+          if (state.selectedNodeId || state.searchHighlightIds.size > 0) {
+            clearSpotlight({ fit: false });
+          }
+        });
+
+      // Configure 3D force distances & charge repulsion
+      const chargeForce = graph.d3Force("charge");
+      if (chargeForce && typeof chargeForce.strength === "function") {
+        chargeForce.strength(-72);
+      }
+      const linkForce = graph.d3Force("link");
+      if (linkForce && typeof linkForce.distance === "function") {
+        linkForce.distance((l) => {
+          if (l.connectionType === "cross_agent_bridge") return 135;
+          return Math.max(26, 92 * (1 - l.connectionStrength));
+        });
+      }
+
+      // Configure OrbitControls 3D auto-rotation
+      function syncAutoOrbit() {
+        const controls = graph.controls && graph.controls();
+        if (controls) {
+          controls.autoRotate = state.autoOrbit;
+          controls.autoRotateSpeed = 0.65;
+          controls.enableDamping = true;
+          controls.dampingFactor = 0.08;
+        }
+        elOrbitBtn.classList.toggle("active", state.autoOrbit);
+      }
+      syncAutoOrbit();
+
+      function handleResize() {
+        const rect = elViewport.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          graph.width(rect.width).height(rect.height);
+        }
+      }
+      window.addEventListener("resize", handleResize);
+      handleResize();
+
+      function refresh3DStyles() {
+        if (typeof graph.refresh === "function") {
+          graph.refresh();
+        }
+        graph
+          .nodeColor(computeNodeColor)
+          .nodeVal(computeNodeVal)
+          .linkColor(computeLinkColor)
+          .linkWidth(computeLinkWidth)
+          .linkDirectionalParticles(computeLinkParticles);
+      }
+
+      function flyToNode(node, distance = 215, durationMs = 820) {
+        if (!node || typeof node.x !== "number" || typeof node.y !== "number" || typeof node.z !== "number") {
+          return;
+        }
+        // Temporarily pause auto-orbit when flying directly to inspect an engram
+        if (state.autoOrbit) {
+          state.autoOrbit = false;
+          syncAutoOrbit();
+        }
+        const hypot = Math.hypot(node.x, node.y, node.z) || 1;
+        const distRatio = 1 + distance / hypot;
+        const newPos =
+          Math.hypot(node.x, node.y, node.z) < 12
+            ? { x: node.x, y: node.y + 25, z: node.z + distance }
+            : { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio };
+        graph.cameraPosition(newPos, { x: node.x, y: node.y, z: node.z }, durationMs);
+      }
+
+      function recomputeSpotlightSet() {
+        const set = new Set();
+        if (state.selectedNodeId) {
+          set.add(state.selectedNodeId);
+          const nbrs = state.neighborsById.get(state.selectedNodeId) || [];
+          for (const nb of nbrs) set.add(nb.peerId);
+        }
+        for (const id of state.searchHighlightIds) {
+          set.add(id);
+        }
+        state.activeSpotlightIds = set;
+
+        if (set.size > 0) {
+          const label = state.searchHighlightIds.size > 0
+            ? `3D Recall Spotlight: ${state.searchHighlightIds.size} activated engrams`
+            : `Focused Circuit: ${state.selectedNodeId} (${set.size - 1} connected DG synapses)`;
+          elSpotlightText.textContent = label;
+          elSpotlightBanner.classList.add("visible");
+        } else {
+          elSpotlightBanner.classList.remove("visible");
+        }
+      }
+
+      function clearSpotlight({ fit = true } = {}) {
+        state.selectedNodeId = null;
+        state.searchHighlightIds.clear();
+        state.searchScoresById.clear();
+        state.legendFilter = null;
+        recomputeSpotlightSet();
+        refresh3DStyles();
+        if (fit) {
+          graph.zoomToFit(700, 55);
+        }
+      }
+
+      // ─── Sidebar Tabs ───
+      function switchTab(tabName) {
+        document.querySelectorAll(".tab-btn").forEach((b) => {
+          b.classList.toggle("active", b.dataset.tab === tabName);
+        });
+        document.querySelectorAll(".tab-pane").forEach((p) => {
+          p.classList.toggle("active", p.id === `tab-${tabName}`);
+        });
+      }
+
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+      });
+
+      // ─── Render Dynamic Legend ───
+      function renderLegend() {
+        let entries = [];
+        if (state.activeLens === "category") {
+          elLegendTitle.textContent = "Active Lens: 8 Semantic Cortical Domains (Click to Spotlight)";
+          entries = Object.entries(CATEGORY_COLORS).map(([k, color]) => ({
+            key: k,
+            label: k.charAt(0).toUpperCase() + k.slice(1),
+            color,
+          }));
+        } else if (state.activeLens === "provenance") {
+          elLegendTitle.textContent = "Active Lens: Provenance & Multi-Harness Federation";
+          const labels = {
+            user_ruling: "P1 User Ruling",
+            iron_law: "P1 Iron Law",
+            claude_memory: "P1 Claude Memory",
+            openwiki: "P1 OpenWiki",
+            audit: "P1 Mission Audit",
+            ace_playbook: "ACE Playbook",
+            reference: "P1 Reference",
+            reconsolidated: "Reconsolidated",
+            custom: "CA1 Custom",
+            skill: "P2 Skill",
+            fact: "P2 Fact",
+            agent_tentative: "P3 Tentative",
+          };
+          entries = Object.entries(PROVENANCE_COLORS).map(([k, color]) => ({
+            key: k,
+            label: labels[k] || k,
+            color,
+          }));
+        } else if (state.activeLens === "workspace") {
+          elLegendTitle.textContent = "Active Lens: Multi-Agent Workspace Constellations";
+          const slugs = [...new Set(state.rawNodes.map((n) => n.agentSlug))];
+          entries = slugs.map((slug) => {
+            const sample = state.rawNodes.find((n) => n.agentSlug === slug);
+            return {
+              key: slug,
+              label: sample ? sample.agentLabel : slug,
+              color: workspaceColor(slug),
+            };
+          });
+        } else if (state.activeLens === "kuramoto") {
+          elLegendTitle.textContent = "Active Lens: Kuramoto Beta-Ring Phase & Upgrade-K Mask";
+          entries = [
+            { key: "q1", label: "Phase Q1 [0, pi/2) Aligned", color: KURAMOTO_COLORS.q1 },
+            { key: "q2", label: "Phase Q2 [pi/2, pi] Aligned", color: KURAMOTO_COLORS.q2 },
+            { key: "q3", label: "Phase Q3 [-pi, -pi/2) Aligned", color: KURAMOTO_COLORS.q3 },
+            { key: "q4", label: "Phase Q4 [-pi/2, 0) Aligned", color: KURAMOTO_COLORS.q4 },
+            { key: "masked", label: "Upgrade-K Masked (r < 0.12)", color: KURAMOTO_COLORS.masked },
+          ];
+        } else {
+          elLegendTitle.textContent = "Active Lens: Amygdala Salience & 1h Labile Plasticity";
+          entries = [
+            { key: "labile", label: "Labile (1h Active)", color: "#f97316" },
+            { key: "salient", label: "High Salience / Urgency", color: "#f43f5e" },
+            { key: "positive", label: "Positive / High Certainty", color: "#10b981" },
+            { key: "neutral", label: "Consolidated Baseline", color: "#3b82f6" },
+          ];
+        }
+
+        elLegendGrid.innerHTML = entries
+          .map(
+            (e) => `<div class="legend-item" data-lkey="${escapeHtml(e.key)}">
+              <span class="legend-swatch" style="background:${e.color};color:${e.color}"></span>
+              <span>${escapeHtml(e.label)}</span>
+            </div>`
+          )
+          .join("");
+
+        elLegendGrid.querySelectorAll(".legend-item").forEach((item) => {
+          item.addEventListener("click", () => {
+            const key = item.dataset.lkey;
+            if (state.legendFilter === key) {
+              clearSpotlight({ fit: false });
+              return;
+            }
+            state.legendFilter = key;
+            state.selectedNodeId = null;
+            state.searchHighlightIds.clear();
+            for (const n of state.visibleNodes) {
+              const match =
+                (state.activeLens === "category" && n.category === key) ||
+                (state.activeLens === "provenance" && n.provenance === key) ||
+                (state.activeLens === "workspace" && n.agentSlug === key) ||
+                (state.activeLens === "kuramoto" && kuramotoQuadrant(n) === key) ||
+                (state.activeLens === "valence" &&
+                  ((key === "labile" && n.isLabile) ||
+                    (key === "salient" && !n.isLabile && (n.emotionalBoost >= 0.48 || n.valence?.intensity >= 0.35)) ||
+                    (key === "positive" && !n.isLabile && n.valence?.valence > 0.08) ||
+                    (key === "neutral" && !n.isLabile && !(n.emotionalBoost >= 0.48) && !(n.valence?.valence > 0.08))));
+              if (match) state.searchHighlightIds.add(n.id);
+            }
+            recomputeSpotlightSet();
+            refresh3DStyles();
+          });
+        });
+      }
+
+      // ─── Filter & Push Graph Data to 3D Scene ───
+      function applyFiltersAndRenderGraph({ fitAfter = false } = {}) {
+        const bridgeNodeIds = new Set();
+        if (state.tierFilter === "bridges") {
+          for (const s of state.rawSynapses) {
+            if (s.connectionType === "cross_agent_bridge") {
+              bridgeNodeIds.add(s.memoryA);
+              bridgeNodeIds.add(s.memoryB);
+            }
+          }
+        }
+
+        const filteredNodes = state.rawNodes.filter((n) => {
+          if (state.tierFilter === "p1") return n.priority === 1;
+          if (state.tierFilter === "p1p2") return n.priority <= 2;
+          if (state.tierFilter === "labile") return Boolean(n.isLabile);
+          if (state.tierFilter === "bridges") return bridgeNodeIds.has(n.id);
+          return true;
+        });
+
+        const allowedIds = new Set(filteredNodes.map((n) => n.id));
+        const nodesClone = filteredNodes.map((n) => {
+          const prev = state.nodeById.get(n.id);
+          // Preserve existing 3D coordinates across filter tweaks for smooth transitions
+          return prev && typeof prev.x === "number"
+            ? { ...n, x: prev.x, y: prev.y, z: prev.z }
+            : { ...n };
+        });
+
+        state.nodeById.clear();
+        state.neighborsById.clear();
+        for (const n of nodesClone) {
+          state.nodeById.set(n.id, n);
+          state.neighborsById.set(n.id, []);
+        }
+
+        const linksClone = [];
+        for (const s of state.rawSynapses) {
+          if (!allowedIds.has(s.memoryA) || !allowedIds.has(s.memoryB)) continue;
+          linksClone.push({
+            id: s.id,
+            source: s.memoryA,
+            target: s.memoryB,
+            connectionType: s.connectionType,
+            connectionStrength: s.connectionStrength,
+          });
+          state.neighborsById.get(s.memoryA).push({ peerId: s.memoryB, synapse: s });
+          state.neighborsById.get(s.memoryB).push({ peerId: s.memoryA, synapse: s });
+        }
+
+        for (const list of state.neighborsById.values()) {
+          list.sort((a, b) => b.synapse.connectionStrength - a.synapse.connectionStrength);
+        }
+
+        state.visibleNodes = nodesClone;
+        state.visibleLinks = linksClone;
+
+        graph.graphData({ nodes: nodesClone, links: linksClone });
+        renderLegend();
+
+        if (fitAfter) {
+          setTimeout(() => graph.zoomToFit(750, 55), 320);
+        }
+      }
+
+      // ─── Select Neuron & Populate Inspector ───
+      function selectNeuron(nodeId, { fly = true, switchTab: doSwitch = true } = {}) {
+        const key = String(nodeId ?? "");
+        const node = state.nodeById.get(key) || state.nodeById.get(Number(key));
+        if (!node) return;
+
+        state.selectedNodeId = node.id;
+        recomputeSpotlightSet();
+        refresh3DStyles();
+
+        if (fly) {
+          flyToNode(node, 215, 820);
+        }
+        if (doSwitch) {
+          switchTab("inspector");
+        }
+
+        document.getElementById("inspectorEmpty").style.display = "none";
+        const detail = document.getElementById("inspectorDetail");
+        detail.style.display = "flex";
+
+        document.getElementById("inspHeaderId").textContent = `${node.agentLabel} #${node.numericId}`;
+        document.getElementById("inspSource").textContent = `Source: ${node.source}`;
+        document.getElementById("inspContent").textContent = node.content;
+        document.getElementById("reconTextarea").value = node.content;
+        document.getElementById("reconStatus").className = "status-msg";
+
+        const pClass = node.priority === 1 ? "p1" : node.priority === 2 ? "p2" : "p3";
+        const kTag = node.kuramoto
+          ? node.kuramoto.valid
+            ? `<span class="tag" style="border-color:rgba(56,189,248,0.45);color:#7dd3fc;">Kuramoto &theta;=${node.kuramoto.theta.toFixed(2)} r=${node.kuramoto.magnitude.toFixed(2)}</span>`
+            : `<span class="tag">Upgrade-K Masked (r=${node.kuramoto.magnitude.toFixed(2)})</span>`
+          : "";
+        const aceTag =
+          typeof node.aceReliability === "number"
+            ? `<span class="tag" style="border-color:rgba(74,222,128,0.45);color:#86efac;">ACE R=${node.aceReliability.toFixed(2)}</span>`
+            : "";
+        const tagsHtml = [
+          `<span class="tag ${pClass}">P${node.priority} &bull; ${escapeHtml(node.provenance)}</span>`,
+          `<span class="tag">${escapeHtml(node.category)}</span>`,
+          `<span class="tag">Res ${node.resonanceScore.toFixed(1)}</span>`,
+          `<span class="tag">Age ${node.ageDays}d</span>`,
+          kTag,
+          aceTag,
+          node.isLabile
+            ? `<span class="tag labile">LABILE (${Math.ceil(node.labileRemainingSec / 60)}m left)</span>`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("");
+        document.getElementById("inspTags").innerHTML = tagsHtml;
+
+        document.getElementById("inspDgBadge").textContent = `${node.activeNeurons} / 4096 k-WTA`;
+
+        const v = node.valence || {};
+        const dims = [
+          ["Valence", ((v.valence ?? 0) + 1) / 2, (v.valence ?? 0).toFixed(2)],
+          ["Arousal", v.arousal ?? 0, (v.arousal ?? 0).toFixed(2)],
+          ["Dominance", v.dominance ?? 0, (v.dominance ?? 0).toFixed(2)],
+          ["Certainty", v.certainty ?? 0, (v.certainty ?? 0).toFixed(2)],
+          ["Relevance", v.relevance ?? 0, (v.relevance ?? 0).toFixed(2)],
+          ["Urgency", v.urgency ?? 0, (v.urgency ?? 0).toFixed(2)],
+        ];
+        document.getElementById("inspValenceBars").innerHTML = dims
+          .map(
+            ([lbl, pct, raw]) => `<div class="bar-row">
+              <div class="bar-head"><span>${lbl}</span><span>${raw}</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width:${Math.round(Math.max(4, Math.min(100, pct * 100)))}%"></div></div>
+            </div>`
+          )
+          .join("");
+
+        const neighbors = state.neighborsById.get(node.id) || [];
+        document.getElementById("inspDegree").textContent = `${neighbors.length} synapses`;
+        const synContainer = document.getElementById("inspSynapses");
+        if (neighbors.length === 0) {
+          synContainer.innerHTML = `<div class="empty-hint" style="padding:8px;">No synapses above current DG cosine threshold (${state.minSynapse.toFixed(2)}).</div>`;
+        } else {
+          synContainer.innerHTML = neighbors
+            .map(({ peerId, synapse }) => {
+              const peer = state.nodeById.get(peerId);
+              if (!peer) return "";
+              const badgeColor =
+                synapse.connectionType === "cross_agent_bridge"
+                  ? "#fde047"
+                  : synapse.connectionType === "ca3_strong_engram"
+                  ? "#38bdf8"
+                  : "#94a3b8";
+              return `<div class="synapse-item" data-peer="${escapeHtml(peer.id)}">
+                <div class="synapse-top">
+                  <span style="color:${badgeColor}">${escapeHtml(peer.agentLabel)} #${peer.numericId}</span>
+                  <span>DG=${synapse.connectionStrength.toFixed(3)} (${escapeHtml(synapse.connectionType)})</span>
+                </div>
+                <div class="synapse-preview">${escapeHtml(peer.preview)}</div>
+              </div>`;
+            })
+            .join("");
+
+          synContainer.querySelectorAll(".synapse-item").forEach((el) => {
+            el.addEventListener("click", () => {
+              selectNeuron(el.dataset.peer, { fly: true, switchTab: false });
+            });
+          });
+        }
+      }
+
+      document.getElementById("flyNodeBtn").addEventListener("click", () => {
+        if (state.selectedNodeId) {
+          const n = state.nodeById.get(state.selectedNodeId);
+          if (n) flyToNode(n, 195, 750);
+        }
+      });
+
+      // ─── API Loaders ───
+      async function loadAgentsList() {
+        const res = await fetch("/api/v1/agents");
+        const data = await res.json();
+        state.agents = data.agents || [];
+        elAgentSelect.innerHTML = state.agents
+          .map(
+            (a) =>
+              `<option value="${escapeHtml(a.id)}">${escapeHtml(
+                a.id === "all" ? a.name : `${a.name} (${a.activeCount} neurons)`
+              )}</option>`
+          )
+          .join("");
+        elAgentSelect.value = state.agentId;
+      }
+
+      async function loadGraphAndTelemetry({ fitAfter = true } = {}) {
+        elLoading.classList.remove("hidden");
+        try {
+          const q = `agentId=${encodeURIComponent(state.agentId)}&minSynapse=${state.minSynapse.toFixed(2)}&limit=1500`;
+          const [graphRes, vitalsRes, cogRes] = await Promise.all([
+            fetch(`/api/v1/graph?${q}`),
+            fetch(`/api/v1/vitals?agentId=${encodeURIComponent(state.agentId)}`),
+            fetch(`/api/v1/cognition?agentId=${encodeURIComponent(state.agentId)}`),
+          ]);
+
+          const graphData = await graphRes.json();
+          const vitalsData = await vitalsRes.json();
+          const cogData = await cogRes.json();
+
+          state.rawNodes = graphData.nodes || [];
+          state.rawSynapses = graphData.synapses || [];
+
+          // Update KPI counters
+          const st = graphData.stats || {};
+          document.getElementById("kpiNeurons").textContent = st.returnedNodes ?? 0;
+          document.getElementById("kpiSynapses").textContent = st.totalSynapses ?? 0;
+          document.getElementById("kpiBridges").textContent = st.crossAgentSynapses ?? 0;
+          document.getElementById("kpiRulings").textContent = st.userRulingCount ?? 0;
+          document.getElementById("kpiLabile").textContent = st.labileCount ?? 0;
+          document.getElementById("kpiResonance").textContent = (st.avgResonance ?? 0).toFixed(2);
+
+          // Render Top Entities
+          const topEntities = st.topEntities || [];
+          elEntityBar.innerHTML = topEntities
+            .slice(0, 12)
+            .map(
+              (e) =>
+                `<span class="entity-chip" data-ent="${escapeHtml(e.name)}">${escapeHtml(e.name)} <span style="color:#64748b">${e.count}</span></span>`
+            )
+            .join("");
+          elEntityBar.querySelectorAll(".entity-chip").forEach((chip) => {
+            chip.addEventListener("click", () => {
+              elSearchInput.value = chip.dataset.ent;
+              executeHybridSearch(chip.dataset.ent);
+            });
+          });
+
+          renderVitalsAndCognition(vitalsData, cogData);
+          applyFiltersAndRenderGraph({ fitAfter });
+        } finally {
+          elLoading.classList.add("hidden");
+        }
+      }
+
+      function renderVitalsAndCognition(vitals, cog) {
+        const pill = document.getElementById("healthPill");
+        const hText = document.getElementById("healthText");
+        const health = (vitals?.health || "healthy").toLowerCase();
+        pill.className = `health-pill ${health === "healthy" ? "" : health}`;
+        hText.textContent = health.toUpperCase();
+
+        const vRows = [];
+        for (const w of vitals?.warnings || []) {
+          vRows.push(
+            `<div class="check-row warn"><span class="check-icon">!</span><div><strong>${escapeHtml(w.title)}</strong><div style="color:#94a3b8;font-size:11px;">${escapeHtml(w.detail)}</div></div></div>`
+          );
+        }
+        for (const ok of vitals?.okChecks || []) {
+          vRows.push(`<div class="check-row"><span class="check-icon">&check;</span><div>${escapeHtml(ok)}</div></div>`);
+        }
+        document.getElementById("vitalsList").innerHTML = vRows.join("") || `<div class="empty-hint">No vitals reported.</div>`;
+
+        const labiles = cog?.labileMemories || [];
+        document.getElementById("labileFeedCount").textContent = `${labiles.length} active`;
+        const labList = document.getElementById("labileList");
+        if (labiles.length === 0) {
+          labList.innerHTML = `<div class="empty-hint" style="padding:8px;">No memories currently in the 1-hour labile window. Run a qualified (&ge; 0.34) recall search to activate labile plasticity!</div>`;
+        } else {
+          labList.innerHTML = labiles
+            .slice(0, 12)
+            .map(
+              (m) => `<div class="synapse-item" data-lid="${escapeHtml(m.id)}">
+                <div class="synapse-top">
+                  <span style="color:#fdba74">${escapeHtml(m.source)}</span>
+                  <span>${Math.ceil(m.remainingSec / 60)}m left</span>
+                </div>
+                <div class="synapse-preview">${escapeHtml(m.preview)}</div>
+              </div>`
+            )
+            .join("");
+          labList.querySelectorAll(".synapse-item").forEach((item) => {
+            item.addEventListener("click", () => selectNeuron(item.dataset.lid, { fly: true, switchTab: true }));
+          });
+        }
+
+        const feed = cog?.artifacts || [];
+        document.getElementById("cognitionFeed").innerHTML =
+          feed.length === 0
+            ? `<div class="empty-hint" style="padding:8px;">No reconsolidation or runtime receipts recorded yet.</div>`
+            : feed
+                .slice(0, 20)
+                .map(
+                  (f) => `<div class="feed-item">
+                    <div class="feed-head">
+                      <span style="color:#7dd3fc">${escapeHtml(f.type)}</span>
+                      <span>${escapeHtml(f.created)}</span>
+                    </div>
+                    <div style="color:#cbd5e1">${escapeHtml(f.content)}</div>
+                  </div>`
+                )
+                .join("");
+      }
+
+      // ─── Live 6-Factor Hybrid Search ───
+      async function executeHybridSearch(queryText) {
+        const query = String(queryText || "").trim();
+        if (!query) return;
+
+        const res = await fetch("/api/v1/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            agentId: state.agentId,
+            limit: 12,
+          }),
+        });
+        const data = await res.json();
+        const results = data.results || [];
+
+        document.getElementById("searchLatency").textContent = `${results.length} hits in ${data.elapsedMs}ms`;
+        switchTab("recall");
+
+        state.selectedNodeId = null;
+        state.searchHighlightIds.clear();
+        state.searchScoresById.clear();
+
+        const qualifiedHits = results.filter((r) => r.qualified);
+        const toHighlight = qualifiedHits.length > 0 ? qualifiedHits : results.slice(0, 5);
+        for (const r of toHighlight) {
+          state.searchHighlightIds.add(r.id);
+          state.searchScoresById.set(r.id, r.scores.hybrid);
+        }
+
+        recomputeSpotlightSet();
+        refresh3DStyles();
+
+        if (toHighlight.length > 0) {
+          const topNode = state.nodeById.get(toHighlight[0].id);
+          if (topNode) flyToNode(topNode, 145, 850);
+        }
+
+        const container = document.getElementById("searchResultsList");
+        if (results.length === 0) {
+          container.innerHTML = `<div class="empty-hint">No matching memories found for "${escapeHtml(query)}".</div>`;
+        } else {
+          container.innerHTML = results
+            .map(
+              (r) => `<div class="result-card" data-rid="${escapeHtml(r.id)}">
+                <div class="result-top">
+                  <span style="color:#7dd3fc">${escapeHtml(r.agentLabel)} #${r.numericId}</span>
+                  <span style="color:${r.qualified ? "#34d399" : "#94a3b8"}">Hybrid ${r.scores.hybrid.toFixed(3)}</span>
+                </div>
+                <div style="font-family:var(--font-mono);font-size:10px;color:#64748b;margin-bottom:4px;">${escapeHtml(r.source)}</div>
+                <div class="result-preview">${escapeHtml(r.content)}</div>
+                <div class="score-chips">
+                  <span class="score-chip ${r.qualified ? "qualified" : ""}">${r.qualified ? "QUALIFIED &ge;0.34" : "sub-gate"}</span>
+                  <span class="score-chip">DG ${r.scores.dgSim.toFixed(2)}</span>
+                  <span class="score-chip">BM25 ${r.scores.bm25.toFixed(2)}</span>
+                  <span class="score-chip">Rec ${r.scores.recency.toFixed(2)}</span>
+                  <span class="score-chip">Val ${r.scores.emotionalBoost.toFixed(2)}</span>
+                  <span class="score-chip">&Phi; ${(r.scores.phaseCoherence ?? 0).toFixed(2)}</span>
+                </div>
+              </div>`
+            )
+            .join("");
+
+          container.querySelectorAll(".result-card").forEach((card) => {
+            card.addEventListener("click", () => {
+              selectNeuron(card.dataset.rid, { fly: true, switchTab: true });
+            });
+          });
+        }
+
+        // Refresh labile counters in background since qualified hits (>= 0.34) enter the 1h labile window!
+        if (qualifiedHits.length > 0) {
+          const [vRes, cRes] = await Promise.all([
+            fetch(`/api/v1/vitals?agentId=${encodeURIComponent(state.agentId)}`),
+            fetch(`/api/v1/cognition?agentId=${encodeURIComponent(state.agentId)}`),
+          ]);
+          const vData = await vRes.json();
+          const cData = await cRes.json();
+          document.getElementById("kpiLabile").textContent = (cData.labileMemories || []).length;
+          renderVitalsAndCognition(vData, cData);
+        }
+      }
+
+      // ─── CA1 Ingest & Labile Reconsolidation Actions ───
+      document.getElementById("ingestBtn").addEventListener("click", async () => {
+        const statusEl = document.getElementById("ingestStatus");
+        const content = document.getElementById("ingestContent").value.trim();
+        const source = document.getElementById("ingestSource").value.trim() || "dashboard-ruling";
+        if (content.length < 15) {
+          statusEl.className = "status-msg err";
+          statusEl.textContent = "Fact must be at least 15 characters.";
+          return;
+        }
+        const res = await fetch("/api/v1/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agentId: state.agentId, content, source }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          statusEl.className = "status-msg err";
+          statusEl.textContent = data.error || "Ingest failed.";
+          return;
+        }
+        if (data.status === "refused_duplicate") {
+          statusEl.className = "status-msg warn";
+          statusEl.textContent = `CA1 Novelty Gate refused duplicate (novelty=${Number(data.noveltyScore).toFixed(2)}, maxSim=${Number(data.maxSimilarity || 1 - data.noveltyScore).toFixed(2)}). Existing #${data.existingId} (${data.existingSource}).`;
+        } else {
+          statusEl.className = "status-msg ok";
+          statusEl.textContent = `Encoded new neuron #${data.id} into ${data.agentId} (recallBoost=${Number(data.salience?.recallBoost || 0.3).toFixed(2)}).`;
+          document.getElementById("ingestContent").value = "";
+          await loadAgentsList();
+          await loadGraphAndTelemetry({ fitAfter: false });
+          const targetId = `${data.agentId}::${data.id}`;
+          setTimeout(() => selectNeuron(targetId, { fly: true, switchTab: false }), 250);
+        }
+      });
+
+      document.getElementById("reconBtn").addEventListener("click", async () => {
+        const statusEl = document.getElementById("reconStatus");
+        if (!state.selectedNodeId) return;
+        const node = state.nodeById.get(state.selectedNodeId);
+        if (!node) return;
+        const content = document.getElementById("reconTextarea").value.trim();
+        if (content.length < 15) {
+          statusEl.className = "status-msg err";
+          statusEl.textContent = "Reconsolidated content must be at least 15 characters.";
+          return;
+        }
+        const res = await fetch("/api/v1/reconsolidate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentId: node.agentSlug,
+            memoryId: node.numericId,
+            content,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.status === "not_found") {
+          statusEl.className = "status-msg err";
+          statusEl.textContent = data.error || "Memory not found for reconsolidation.";
+          return;
+        }
+        statusEl.className = "status-msg ok";
+        statusEl.textContent = `Reconsolidated #${data.previousId ?? data.supersededId} -> #${data.newId} (artifact #${data.artifactId}, wasLabile=${data.wasLabile}).`;
+        await loadGraphAndTelemetry({ fitAfter: false });
+        const nextId = data.compositeNewId;
+        setTimeout(() => selectNeuron(nextId, { fly: true, switchTab: false }), 250);
+      });
+
+      // ─── UI Event Bindings ───
+      elAgentSelect.addEventListener("change", async () => {
+        state.agentId = elAgentSelect.value;
+        clearSpotlight({ fit: false });
+        await loadGraphAndTelemetry({ fitAfter: true });
+      });
+
+      elSearchForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        executeHybridSearch(elSearchInput.value);
+      });
+
+      elResetBtn.addEventListener("click", () => {
+        elSearchInput.value = "";
+        clearSpotlight({ fit: true });
+      });
+
+      elClearSpotlightBtn.addEventListener("click", () => {
+        clearSpotlight({ fit: false });
+      });
+
+      document.querySelectorAll("[data-lens]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll("[data-lens]").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          state.activeLens = btn.dataset.lens;
+          state.legendFilter = null;
+          renderLegend();
+          refresh3DStyles();
+        });
+      });
+
+      document.querySelectorAll("[data-tier]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll("[data-tier]").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          state.tierFilter = btn.dataset.tier;
+          applyFiltersAndRenderGraph({ fitAfter: true });
+        });
+      });
+
+      let sliderTimer = null;
+      elSynapseSlider.addEventListener("input", () => {
+        state.minSynapse = parseFloat(elSynapseSlider.value);
+        elSynapseVal.textContent = state.minSynapse.toFixed(2);
+        if (sliderTimer) clearTimeout(sliderTimer);
+        sliderTimer = setTimeout(() => {
+          loadGraphAndTelemetry({ fitAfter: false });
+        }, 220);
+      });
+
+      elOrbitBtn.addEventListener("click", () => {
+        state.autoOrbit = !state.autoOrbit;
+        syncAutoOrbit();
+      });
+
+      elPulsesBtn.addEventListener("click", () => {
+        state.synapticPulses = !state.synapticPulses;
+        elPulsesBtn.classList.toggle("active", state.synapticPulses);
+        refresh3DStyles();
+      });
+
+      elFitBtn.addEventListener("click", () => {
+        graph.zoomToFit(700, 55);
+      });
+
+      document.getElementById("refreshVitalsBtn").addEventListener("click", () => {
+        loadGraphAndTelemetry({ fitAfter: false });
+      });
+
+      // ─── Boot 3D Cortex Dashboard ───
+      (async () => {
+        try {
+          await loadAgentsList();
+          await loadGraphAndTelemetry({ fitAfter: true });
+        } catch (err) {
+          elLoading.innerHTML = `<div style="color:#fb7185">Failed to connect to Cortex v2.6 API: ${escapeHtml(err?.message || err)}</div>`;
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>
