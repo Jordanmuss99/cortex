@@ -14,6 +14,8 @@ import { z } from "zod";
 import { db, schema, initDatabase } from "../db/index.js";
 import { embedQuery } from "../ingestion/embeddings.js";
 import { chunkText, countTokens } from "../ingestion/chunker.js";
+import { buildPromptContextDigest } from "./prompt-context.js";
+import { collectAgentBridgeSession } from "./agentbridge-client.js";
 import { embedTexts } from "../ingestion/embeddings.js";
 import { extractEntities, extractSemanticTags } from "../ingestion/entities.js";
 import { formSynapses } from "../ingestion/synapse-formation.js";
@@ -35,10 +37,12 @@ import { storeProcedural, retrieveProcedural, recordExecution, refineProcedural 
 import { eq, sql, desc, and } from "drizzle-orm";
 import "dotenv/config";
 
-const server = new McpServer({
-  name: "cortex-v2",
-  version: "0.1.0",
-});
+// Server identity shared by the stdio and Streamable-HTTP entrypoints.
+export const SERVER_INFO = { name: "cortex-v2", version: "0.1.0" };
+
+export function createServer(): McpServer {
+  return new McpServer(SERVER_INFO);
+}
 
 // Helper: resolve agent by external ID, create if missing
 async function resolveAgent(externalId: string): Promise<number> {
@@ -61,31 +65,40 @@ async function resolveAgent(externalId: string): Promise<number> {
   return agent.id;
 }
 
-// ─── Tool: cortex_search ────────────────────────────────
-server.tool(
-  "cortex_search",
-  "Search CORTEX memory using hybrid scoring (semantic + text + recency + resonance + priority). Use this whenever you need to recall information from past conversations, files, transcripts, or any stored memory.",
-  {
-    query: z.string().describe("The search query"),
-    agent_id: z
-      .string()
-      .default("arlo")
-      .describe("Agent ID (default: arlo)"),
-    limit: z
-      .number()
-      .default(10)
-      .describe("Max results to return (default: 10)"),
-    verbose: z
-      .boolean()
-      .default(false)
-      .describe("Include temporal validity, priority, resonance details (default: false)"),
-  },
-  async ({ query, agent_id, limit, verbose }) => {
-    const agentId = await resolveAgent(agent_id);
-    const queryEmbedding = await embedQuery(query);
-    const embeddingStr = `[${queryEmbedding.join(",")}]`;
+// One row from the hybrid memory search. Shared shape for cortex_search and
+// cortex_prompt_context so the scoring SQL has a single source of truth.
+type HybridRow = {
+  id: number;
+  content: string;
+  source: string | null;
+  source_type: string | null;
+  priority: number;
+  resonance_score: number;
+  entities: string[] | null;
+  semantic_tags: string[] | null;
+  created_at: string;
+  valid_from: string | null;
+  valid_until: string | null;
+  superseded_by: number | null;
+  hybrid_score: number;
+  cosine_sim: number;
+  text_match: number;
+  recency: number;
+};
 
-    const results = await db.execute(sql`
+// Hybrid 7-factor memory search (semantic + text + recency + resonance + priority +
+// emotional valence). Extracted verbatim from cortex_search so cortex_prompt_context
+// reuses the SAME scoring logic (plan A2/A3) rather than re-implementing search.
+// Read-only: performs no writes (access-count telemetry stays in cortex_search).
+async function runHybridSearch(
+  query: string,
+  agentId: number,
+  limit: number,
+): Promise<HybridRow[]> {
+  const queryEmbedding = await embedQuery(query);
+  const embeddingStr = `[${queryEmbedding.join(",")}]`;
+
+  const results = await db.execute(sql`
       WITH vector_scores AS (
         SELECT
           id,
@@ -134,6 +147,49 @@ server.tool(
       LIMIT ${limit}
     `);
 
+  return results.rows as HybridRow[];
+}
+
+// Registers the full CORTEX tool surface on a given McpServer instance.
+// Both the stdio entrypoint (main below) and the Streamable-HTTP endpoint
+// (http-server.ts) call this so the tool set stays identical across transports.
+// NOTE: read-only exposure for remote consumers (Superhuman Go) is enforced by the
+// HTTP layer's allowlist, not here — this function still registers every tool for stdio.
+export function registerTools(server: McpServer, opts?: { only?: ReadonlySet<string> }): void {
+  if (opts?.only) {
+    const allowed = opts.only;
+    const origTool = server.tool.bind(server);
+    // Filter by tool name (first string arg) so a remote endpoint can expose ONLY the
+    // read-only surface. stdio callers pass no `only` and get the identical full tool set.
+    (server as unknown as { tool: unknown }).tool = (...args: unknown[]) =>
+      typeof args[0] === "string" && !allowed.has(args[0])
+        ? server
+        : (origTool as (...a: unknown[]) => unknown)(...args);
+  }
+// ─── Tool: cortex_search ────────────────────────────────
+server.tool(
+  "cortex_search",
+  "Search CORTEX memory using hybrid scoring (semantic + text + recency + resonance + priority). Use this whenever you need to recall information from past conversations, files, transcripts, or any stored memory.",
+  {
+    query: z.string().describe("The search query"),
+    agent_id: z
+      .string()
+      .default("arlo")
+      .describe("Agent ID (default: arlo)"),
+    limit: z
+      .number()
+      .default(10)
+      .describe("Max results to return (default: 10)"),
+    verbose: z
+      .boolean()
+      .default(false)
+      .describe("Include temporal validity, priority, resonance details (default: false)"),
+  },
+  { readOnlyHint: true },
+  async ({ query, agent_id, limit, verbose }) => {
+    const agentId = await resolveAgent(agent_id);
+    const rows = await runHybridSearch(query, agentId, limit);
+
     // Update access counts (telemetry — best-effort, non-fatal).
     // NOTE (2026-04-10): Uses sql.raw with an explicit ARRAY literal because
     // drizzle-orm serializes JS number arrays as PostgreSQL composite ROW(...)
@@ -141,7 +197,7 @@ server.tool(
     // to integer[]"). The wrapping try/catch ensures that a telemetry failure
     // never kills a successful search response. resultIds are typed as number[]
     // from the caller's SELECT rows, so there is no injection risk.
-    const resultIds = (results.rows as Array<{ id: number }>).map((r) => r.id);
+    const resultIds = rows.map((r) => r.id);
     if (resultIds.length > 0) {
       try {
         const idsLiteral = `ARRAY[${resultIds.join(",")}]::int[]`;
@@ -156,26 +212,7 @@ server.tool(
       }
     }
 
-    const formatted = (
-      results.rows as Array<{
-        id: number;
-        content: string;
-        source: string | null;
-        source_type: string | null;
-        priority: number;
-        resonance_score: number;
-        entities: string[] | null;
-        semantic_tags: string[] | null;
-        created_at: string;
-        valid_from: string | null;
-        valid_until: string | null;
-        superseded_by: number | null;
-        hybrid_score: number;
-        cosine_sim: number;
-        text_match: number;
-        recency: number;
-      }>
-    )
+    const formatted = rows
       .map((r) => {
         const src = r.source?.split("/").pop() || "unknown";
         const entities =
@@ -201,7 +238,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: `# CORTEX Search: "${query}"\nResults: ${results.rows.length}\n\n${formatted || "No results found."}`,
+          text: `# CORTEX Search: "${query}"\nResults: ${rows.length}\n\n${formatted || "No results found."}`,
         },
       ],
     };
@@ -223,6 +260,7 @@ server.tool(
       .default(4000)
       .describe("Max tokens to return (default: 4000)"),
   },
+  { readOnlyHint: true },
   async ({ query, agent_id, token_budget }) => {
     const agentId = await resolveAgent(agent_id);
     const queryEmbedding = await embedQuery(query);
@@ -312,6 +350,47 @@ server.tool(
   }
 );
 
+// ─── Tool: cortex_prompt_context ────────────────────────
+server.tool(
+  "cortex_prompt_context",
+  "One-shot prompt-enrichment context: hybrid-relevant CORTEX memories, active entities and prior-session constraints, optionally combined with LIVE AgentBridge session context (list_sessions + inspect_session), all trimmed to a token budget. Use this to enrich a prompt before sending it to another agent (e.g. Superhuman Go Prompt Rewriter). Read-only. Session enrichment is opt-in: it is included only when the server has AGENTBRIDGE_MCP_URL configured, and degrades to memory-only (or an explicit offline note) otherwise.",
+  {
+    query: z.string().describe("The prompt or topic to enrich"),
+    agent_id: z
+      .string()
+      .default("arlo")
+      .describe("Agent ID (default: arlo)"),
+    token_budget: z
+      .number()
+      .default(1200)
+      .describe("Max estimated tokens for the whole digest (default: 1200)"),
+    limit: z
+      .number()
+      .default(8)
+      .describe("Max memories to consider (default: 8)"),
+    include_session: z
+      .boolean()
+      .default(true)
+      .describe("Merge live AgentBridge session context when configured (default true; no-op when unconfigured)"),
+    session_target: z
+      .string()
+      .optional()
+      .describe("Specific AgentBridge session to inspect (title/PID/UUID). Omit to auto-pick the most recent active session."),
+  },
+  { readOnlyHint: true },
+  async ({ query, agent_id, token_budget, limit, include_session, session_target }) => {
+    const agentId = await resolveAgent(agent_id);
+    const rows = await runHybridSearch(query, agentId, limit);
+    // Opt-in + graceful: undefined when AgentBridge is unconfigured; an explicit offline
+    // note when configured but unreachable. Never throws into the digest.
+    const sessionMarkdown = include_session
+      ? await collectAgentBridgeSession({ target: session_target })
+      : undefined;
+    const text = buildPromptContextDigest(query, rows, agent_id, token_budget, sessionMarkdown);
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
 // ─── Tool: cortex_init ──────────────────────────────────
 server.tool(
   "cortex_init",
@@ -322,6 +401,7 @@ server.tool(
       .default("arlo")
       .describe("Agent ID (default: arlo)"),
   },
+  { readOnlyHint: true },
   async ({ agent_id }) => {
     const agentId = await resolveAgent(agent_id);
 
@@ -1183,6 +1263,7 @@ server.tool(
     return { content: [{ type: "text" as const, text: `Procedural memory #${procedural_id} refined → v${newVersion}` }] };
   }
 );
+}
 
 // ─── Start Server ───────────────────────────────────────
 async function main() {
@@ -1193,6 +1274,8 @@ async function main() {
     console.error("[cortex-mcp] Database init warning:", err);
   }
 
+  const server = createServer();
+  registerTools(server);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[cortex-mcp] CORTEX V2 MCP server running");

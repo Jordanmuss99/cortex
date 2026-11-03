@@ -58,6 +58,7 @@
     "drizzle-orm": "^0.38.4",
     "express": "^4.21.2",
     "gpt-tokenizer": "^2.8.1",
+    "jose": "^6.2.13",
     "openai": "^6.33.0",
     "postgres": "^3.4.8",
     "voyageai": "^0.0.3-1",

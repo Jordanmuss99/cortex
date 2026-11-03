@@ -10,6 +10,7 @@ import { reconsolidateRouter } from "./api/reconsolidate.js";
 import { proceduralRouter } from "./api/procedural.js";
 import { graphRouter } from "./api/graph.js";
 import { dreamRouter } from "./api/dream.js";
+import { handleMcpRequest, handleResourceMetadata } from "./mcp/http-server.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3100", 10);
@@ -27,6 +28,12 @@ app.use("/api/v1/procedural", proceduralRouter);
 app.use("/api/v1/graph", graphRouter);
 app.use("/api/v1/dream", dreamRouter);
 app.use("/api/v1", healthRouter);
+
+// MCP over Streamable HTTP (read-only surface for remote clients, e.g. Superhuman Go).
+// OAuth 2.1 resource-server auth (managed IdP mints JWTs; Cortex verifies) with a static-bearer
+// fallback (CORTEX_MCP_TOKEN). Fail-closed when neither is configured.
+app.get("/.well-known/oauth-protected-resource", handleResourceMetadata);
+app.post("/mcp", express.json({ limit: "1mb" }), handleMcpRequest);
 
 // Root
 app.get("/", (_req, res) => {

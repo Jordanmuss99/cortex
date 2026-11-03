@@ -8,6 +8,14 @@
   ],
   "routes": [
     {
+      "src": "/.well-known/oauth-protected-resource",
+      "dest": "src/index.ts"
+    },
+    {
+      "src": "/mcp",
+      "dest": "src/index.ts"
+    },
+    {
       "src": "/api/(.*)",
       "dest": "src/index.ts"
     }
