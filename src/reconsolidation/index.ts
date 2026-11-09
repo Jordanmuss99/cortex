@@ -91,19 +91,25 @@ export async function isLabile(memoryId: number): Promise<boolean> {
  * @param memoryId - ID of the memory to reconsolidate
  * @param newContent - Updated content (can be a correction, expansion, or refinement)
  * @param reason - Why the memory is being updated (for audit trail)
+ * @param agentId - Optional owning-agent scope. When provided, a memory belonging
+ *   to a different agent is reported as not_found rather than mutated — callers
+ *   that resolve an agent namespace must pass it so cross-tenant updates are
+ *   impossible even when the numeric memory id is known.
  * @returns ReconsolidationResult
  */
 export async function reconsolidate(
   memoryId: number,
   newContent: string,
-  reason: string = "belief_update"
+  reason: string = "belief_update",
+  agentId?: number
 ): Promise<ReconsolidationResult> {
-  // Step 1: Verify memory exists and is labile
+  // Step 1: Verify memory exists (within the caller's agent namespace) and is labile
   const memResult = await db.execute(sql`
     SELECT id, agent_id, content, source, priority, resonance_score, last_recalled_at
     FROM memory_nodes
     WHERE id = ${memoryId}
       AND status = 'active'
+      ${agentId !== undefined ? sql`AND agent_id = ${agentId}` : sql``}
     LIMIT 1
   `);
 
@@ -134,14 +140,11 @@ export async function reconsolidate(
     return { memoryId, status: "window_closed", resonanceBoost: 0 };
   }
 
-  // Step 2: Mark temporal validity — the old version is no longer current
-  await db.execute(sql`
-    UPDATE memory_nodes
-    SET valid_until = NOW()
-    WHERE id = ${memoryId}
-  `);
-
-  // Step 3: Store original content as a cognitive artifact (audit trail)
+  // Step 2: Store original content as a cognitive artifact (audit trail).
+  // Temporal semantics: this update is in-place — the row's valid_from is restamped
+  // below and valid_until returns to NULL (still-current). There is no superseded-row
+  // chain; superseded_by is never written by this path (see docs and the wiki's
+  // Temporal Validity page). The previous text survives only in this artifact.
   const [artifact] = await db
     .insert(schema.cognitiveArtifacts)
     .values({
@@ -168,7 +171,7 @@ export async function reconsolidate(
     memory.priority
   );
 
-  // Step 5: Update the memory node
+  // Step 5: Update the memory node (agent predicate re-applied as defense-in-depth)
   // Reconsolidated memories get a resonance boost (they've been validated/corrected)
   const resonanceBoost = 1.5;
   const newResonance = Math.min(
@@ -194,6 +197,7 @@ export async function reconsolidate(
         updated_at = NOW(),
         last_recalled_at = NULL
     WHERE id = ${memoryId}
+      AND agent_id = ${memory.agent_id}
   `);
 
   // Step 6: Update hippocampal code

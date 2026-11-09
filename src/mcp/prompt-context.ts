@@ -1,4 +1,5 @@
 import { countTokens } from "../ingestion/chunker.js";
+import { decode, encode } from "gpt-tokenizer";
 
 /**
  * Pure digest builder for the cortex_prompt_context tool.
@@ -22,9 +23,7 @@ const MAX_ENTITIES = 15;
 const MEM_SNIPPET_CHARS = 200;
 const CONSTRAINT_SNIPPET_CHARS = 160;
 // Memories get this share of the budget; entities + constraints compete for the rest.
-// When a live session block will be appended, memories yield more room to it.
 const MEMORY_SHARE = 0.7;
-const MEMORY_SHARE_WITH_SESSION = 0.5;
 
 function dateOf(s: string): string {
   const d = new Date(s);
@@ -40,7 +39,6 @@ export function buildPromptContextDigest(
   rows: PromptContextRow[],
   agentId: string,
   tokenBudget: number,
-  sessionMarkdown?: string,
 ): string {
   // Aggregate entities across the matched memories (most-mentioned first).
   const entityCounts = new Map<string, number>();
@@ -55,41 +53,25 @@ export function buildPromptContextDigest(
   let usedTokens = 0;
   const parts: string[] = [];
 
-  // Section 1 — relevant memories. Give live session context room by shrinking the
-  // memory share when a session block will be appended.
-  const memoryShare = sessionMarkdown ? MEMORY_SHARE_WITH_SESSION : MEMORY_SHARE;
-  const memoryBudget = Math.floor(tokenBudget * memoryShare);
+  // Section 1 — relevant stored memories. The header rides on the first numbered
+  // line so it is included in the per-line fit check and the usedTokens tally.
+  const memoryBudget = Math.floor(tokenBudget * MEMORY_SHARE);
   const memLines: string[] = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const line = `${i + 1}. [P${r.priority}, r${Number(r.resonance_score).toFixed(1)}, ${dateOf(r.created_at)}] ${snippet(r.content, MEM_SNIPPET_CHARS)}`;
+    const prefix = memLines.length === 0 ? "## Relevant memories (scored)\n" : "";
+    const line = `${prefix}${i + 1}. [P${r.priority}, r${Number(r.resonance_score).toFixed(1)}, ${dateOf(r.created_at)}] ${snippet(r.content, MEM_SNIPPET_CHARS)}`;
     const t = countTokens(line);
     if (usedTokens + t > memoryBudget) break;
     memLines.push(line);
     usedTokens += t;
   }
   if (memLines.length > 0) {
-    const header = "## Relevant memories (scored)";
-    parts.push(`${header}\n${memLines.join("\n")}`);
-    usedTokens += countTokens(`${header}\n`);
+    parts.push(memLines.join("\n"));
   }
 
-  // Section 1.5 — live session context (AgentBridge), truncated to remaining budget.
-  // Always emitted when present (even the offline note) so the Rewriter sees live
-  // context or an explicit "host offline" marker rather than silent absence.
-  if (sessionMarkdown && sessionMarkdown.trim().length > 0) {
-    const header = "## Active session context (AgentBridge)";
-    const remain = Math.max(0, tokenBudget - usedTokens);
-    let block = sessionMarkdown;
-    if (countTokens(block) > remain) {
-      const keep = Math.max(0, remain * 4 - header.length);
-      block = keep > 0 ? block.slice(0, keep) + " …[truncated]" : block.slice(0, 80);
-    }
-    parts.push(`${header}\n${block}`);
-    usedTokens += countTokens(`${header}\n${block}`);
-  }
-
-  // Section 2 — active entities (comma list) if room remains.
+  // Section 2 — active entities (comma list) if room remains. The header is part
+  // of the same counted line, so the fit check below includes it.
   if (topEntities.length > 0) {
     const line = `## Active entities\n${topEntities.join(", ")}`;
     const t = countTokens(line);
@@ -99,20 +81,25 @@ export function buildPromptContextDigest(
     }
   }
 
-  // Section 3 — constraints from prior sessions (P0/P1 memories only).
+  // Section 3 — constraints from prior sessions (P0/P1 memories only). The header
+  // rides on the first bullet so it is counted in the fit check like the other
+  // sections; the trailing hard slice still guarantees the overall budget.
   const constraintLines: string[] = [];
   for (const r of rows.filter((x) => x.priority <= 1)) {
-    const line = `- [P${r.priority}] ${snippet(r.content, CONSTRAINT_SNIPPET_CHARS)}`;
+    const prefix = constraintLines.length === 0 ? "## Constraints from prior sessions\n" : "";
+    const line = `${prefix}- [P${r.priority}] ${snippet(r.content, CONSTRAINT_SNIPPET_CHARS)}`;
     const t = countTokens(line);
     if (usedTokens + t > tokenBudget) break;
     constraintLines.push(line);
     usedTokens += t;
   }
   if (constraintLines.length > 0) {
-    parts.push(`## Constraints from prior sessions\n${constraintLines.join("\n")}`);
+    parts.push(constraintLines.join("\n"));
   }
 
   const body = parts.length > 0 ? parts.join("\n\n") : "No relevant memories found.";
   const footer = `[CORTEX: ${rows.length} nodes, ~${usedTokens} est. tokens, agent=${agentId}]`;
-  return `# CORTEX Prompt Context: "${query}"\n\n${body}\n\n---\n${footer}`;
+  const displayQuery = Array.from(query).slice(0, 200).join("");
+  const output = `# CORTEX Prompt Context: "${displayQuery}"\n\n${body}\n\n---\n${footer}`;
+  return decode(encode(output, { allowedSpecial: "all" }).slice(0, tokenBudget));
 }

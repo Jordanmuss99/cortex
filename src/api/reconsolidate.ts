@@ -22,7 +22,19 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    const result = await reconsolidate(memoryId, newContent, reason);
+    // Resolve the caller's agent namespace so the update cannot touch another
+    // agent's memory by numeric id (same rule the read routes already follow).
+    const [requestingAgent] = await db
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.externalId, agentId));
+
+    if (!requestingAgent) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+
+    const result = await reconsolidate(memoryId, newContent, reason, requestingAgent.id);
 
     if (result.status === "not_found") {
       res.status(404).json({ error: "Memory not found", ...result });

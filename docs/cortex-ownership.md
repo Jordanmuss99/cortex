@@ -15,17 +15,19 @@ different observations.
 |---|---|---|
 | Cortex server memory | Cortex: `src/db/`, `src/ingestion/`, `src/mcp/server.ts` | Database-backed memory. Its agent namespace and authorization are not the local notes filesystem. |
 | Remote Cortex access | Cortex: `src/mcp/http-server.ts`, `src/mcp/auth.ts` | Authenticated, curated read-only HTTP surface. A read-only tool declaration does not prove every dependency is memory-only. |
-| Prompt context composition | Cortex: `src/mcp/prompt-context.ts`, `src/mcp/agentbridge-client.ts` | The current client can add AgentBridge context when `AGENTBRIDGE_MCP_URL` is configured. Unconfigured composition is memory-only. Keep this opt-in boundary explicit. |
+| Prompt memory context | Cortex: `src/mcp/prompt-context.ts` | Stored memories, entities and constraints only. Cortex does not fetch AgentBridge session context, including when legacy environment variables remain configured. |
 | Local OmO memory | SimsOnline: `tools/omo/extensions/cortex-memory.next.js`, `tools/omo/config/`, `tools/omo/install.py` | Filesystem notes, agent-specific memory and federation. Installation selects the live provider; a source revision does not attest which copy is loaded. |
 | Frozen v3 ranker and evaluation | SimsOnline: `tools/omo/extensions/cortex-v3/` | Frozen baseline `7b727bf3`, ranker `cortex-v3-recall/2-lennorm`. Injection telemetry repairs belong outside this directory. |
 | Live injection and outcome telemetry | SimsOnline: `tools/omo/extensions/cortex-v3-inject.js`, `tools/omo/extensions/cortex-v3-inject/` | Owns prompt event identity, holdout wiring and outcome attribution. Uses `cortex-live-recall`, distinct from benchmark messages. Ledgers remain outside tracked source. |
-| AgentBridge | AgentBridge server; Cortex owns only its client adapter | Session history, live inspection and transport. Session context is not an authoritative Cortex memory store, and activity flags alone do not prove work or deployment. |
+| AgentBridge | AgentBridge server and its separate connector | Session history, live inspection and transport. The consuming client owns any composition with Cortex memory; Cortex has no runtime AgentBridge client. |
 
 The HTTP and composition files above include existing local integration work.
 This manifest records their current contracts, not a release or deployment claim.
-Before exposing a connector, decide whether Cortex-side session enrichment or
-separate client-side composition owns the combined result; do not enable both
-implicitly.
+The user selected memory-only Cortex and separate client-side composition.
+Accepted decisions and their scope are recorded in
+[cortex-decisions.md](cortex-decisions.md). Restricted HTTP tools do not provision
+unknown agent namespaces or update access counters; existing full stdio behavior
+remains separate.
 
 ## Canonical identity
 

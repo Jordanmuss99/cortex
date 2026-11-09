@@ -3,6 +3,35 @@
 Implementation plan for exposing CORTEX memory and AgentBridge session context to
 Superhuman Go's **Prompt Rewriter** agent via two custom MCP connectors.
 
+## Current decisions and implementation checkpoint (November 3, 2026)
+
+The user selected memory-only Cortex, separate consumer-side composition,
+shared project identity with preserved agent scopes, and current main with
+selective compatible ports. See [the accepted decisions](cortex-decisions.md).
+
+Cortex's current `/mcp` surface exposes four memory tools. The shared tool module
+is safe to import without starting stdio/database initialization; restricted calls
+do not create agent namespaces or update search access counters. Cortex no longer
+contains a runtime AgentBridge client. Its memory digest honors the complete
+requested token budget. The server suite passes 80 tests and TypeScript checking.
+
+Connector build targets selected by the user are
+`https://cortex.obsidiannetwork.au/mcp` and
+`https://ab.obsidiannetwork.au/api/mcp`. Those choices are not publication,
+deployment, DNS/tunnel-change approval, or evidence that the endpoints are live.
+
+The original planning sections below are historical context. Their old dependency
+availability, process IDs, inferred infrastructure state, and SDK assumptions
+must not be treated as current operational instructions or authorization.
+
+The completed local implementation, commands and activation prerequisites are in
+the [connector runbook](../integrations/README.md). Both definitions pass strict
+checking, SDK validation/build and generated deployment-contract tests. The
+current SDK accepts omission of the search field but not an empty list; the user
+selected `agentbridge_prompt_context` for AgentBridge. See the
+[full project update](cortex-project-update-2026-11-03.md) for evidence boundaries
+and the unresolved SDK dependency audit.
+
 ---
 
 ## 0. TL;DR decisions

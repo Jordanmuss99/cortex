@@ -10,12 +10,12 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { db, schema, initDatabase } from "../db/index.js";
 import { embedQuery } from "../ingestion/embeddings.js";
 import { chunkText, countTokens } from "../ingestion/chunker.js";
 import { buildPromptContextDigest } from "./prompt-context.js";
-import { collectAgentBridgeSession } from "./agentbridge-client.js";
 import { embedTexts } from "../ingestion/embeddings.js";
 import { extractEntities, extractSemanticTags } from "../ingestion/entities.js";
 import { formSynapses } from "../ingestion/synapse-formation.js";
@@ -36,22 +36,33 @@ import { reconsolidate, getLabileMemories } from "../reconsolidation/index.js";
 import { storeProcedural, retrieveProcedural, recordExecution, refineProcedural } from "../procedural/index.js";
 import { eq, sql, desc, and } from "drizzle-orm";
 import "dotenv/config";
+import { PACKAGE_VERSION } from "../lib/version.js";
 
-// Server identity shared by the stdio and Streamable-HTTP entrypoints.
-export const SERVER_INFO = { name: "cortex-v2", version: "0.1.0" };
+// Server identity shared by the stdio and Streamable-HTTP entrypoints. The version is the
+// released package version rather than a hand-kept number, so what MCP clients see during
+// initialize cannot fall behind a release bump.
+export const SERVER_INFO = { name: "cortex-v2", version: PACKAGE_VERSION };
 
 export function createServer(): McpServer {
   return new McpServer(SERVER_INFO);
 }
 
-// Helper: resolve agent by external ID, create if missing
-async function resolveAgent(externalId: string): Promise<number> {
+class AgentNotFoundError extends Error {
+  constructor(externalId: string) {
+    super(`Unknown agent: ${externalId}`);
+    this.name = "AgentNotFoundError";
+  }
+}
+
+// Restricted transports must not provision agent namespaces while reading.
+async function resolveAgent(externalId: string, createIfMissing = true): Promise<number> {
   let [agent] = await db
     .select()
     .from(schema.agents)
     .where(eq(schema.agents.externalId, externalId));
 
   if (!agent) {
+    if (!createIfMissing) throw new AgentNotFoundError(externalId);
     [agent] = await db
       .insert(schema.agents)
       .values({
@@ -187,7 +198,7 @@ server.tool(
   },
   { readOnlyHint: true },
   async ({ query, agent_id, limit, verbose }) => {
-    const agentId = await resolveAgent(agent_id);
+    const agentId = await resolveAgent(agent_id, !opts?.only);
     const rows = await runHybridSearch(query, agentId, limit);
 
     // Update access counts (telemetry — best-effort, non-fatal).
@@ -198,7 +209,7 @@ server.tool(
     // never kills a successful search response. resultIds are typed as number[]
     // from the caller's SELECT rows, so there is no injection risk.
     const resultIds = rows.map((r) => r.id);
-    if (resultIds.length > 0) {
+    if (!opts?.only && resultIds.length > 0) {
       try {
         const idsLiteral = `ARRAY[${resultIds.join(",")}]::int[]`;
         await db.execute(sql`
@@ -262,30 +273,14 @@ server.tool(
   },
   { readOnlyHint: true },
   async ({ query, agent_id, token_budget }) => {
-    const agentId = await resolveAgent(agent_id);
-    const queryEmbedding = await embedQuery(query);
-    const embeddingStr = `[${queryEmbedding.join(",")}]`;
+    const agentId = await resolveAgent(agent_id, !opts?.only);
 
-    // Fetch candidates
-    const results = await db.execute(sql`
-      WITH vector_scores AS (
-        SELECT
-          id, content, source,
-          1 - (embedding <=> ${embeddingStr}::vector) AS cosine_sim,
-          CASE WHEN content ILIKE ${"%" + query + "%"} THEN 1.0 ELSE 0.0 END AS text_match,
-          EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) AS recency,
-          LEAST(resonance_score / 10.0, 1.0) AS norm_resonance,
-          CASE priority WHEN 0 THEN 1.0 WHEN 1 THEN 0.8 WHEN 2 THEN 0.5 WHEN 3 THEN 0.3 ELSE 0.1 END AS priority_boost
-        FROM memory_nodes
-        WHERE agent_id = ${agentId} AND status = 'active' AND embedding IS NOT NULL
-      )
-      SELECT vs.*,
-        (0.45 * vs.cosine_sim + 0.18 * vs.text_match + 0.12 * vs.recency + 0.10 * vs.norm_resonance + 0.05 * vs.priority_boost + 0.10 * COALESCE(ev.recall_boost, 0)) AS hybrid_score
-      FROM vector_scores vs
-      LEFT JOIN emotional_valence ev ON ev.memory_id = vs.id
-      ORDER BY hybrid_score DESC
-      LIMIT 50
-    `);
+    // Single scoring source: runHybridSearch is the same six-weight SQL used by
+    // cortex_search and cortex_prompt_context (plan A2/A3). This replaces an older
+    // inline copy that had drifted (missing the explicit P4 priority branch and
+    // temporal columns). Read-only by design: like every `only`-safe path it opens
+    // no reconsolidation windows and updates no counters.
+    const rows = await runHybridSearch(query, agentId, 50);
 
     // Also get recent cognitive artifacts
     const artifacts = await db
@@ -303,12 +298,7 @@ server.tool(
     parts.push("## Relevant Memories\n");
     usedTokens += countTokens("## Relevant Memories\n");
 
-    for (const row of results.rows as Array<{
-      id: number;
-      content: string;
-      source: string | null;
-      hybrid_score: number;
-    }>) {
+    for (const row of rows) {
       const src = row.source?.split("/").pop() || "unknown";
       const block = `### Memory #${row.id} [${src}] (score: ${Number(row.hybrid_score).toFixed(3)})\n${row.content}\n`;
       const blockTokens = countTokens(block);
@@ -353,7 +343,7 @@ server.tool(
 // ─── Tool: cortex_prompt_context ────────────────────────
 server.tool(
   "cortex_prompt_context",
-  "One-shot prompt-enrichment context: hybrid-relevant CORTEX memories, active entities and prior-session constraints, optionally combined with LIVE AgentBridge session context (list_sessions + inspect_session), all trimmed to a token budget. Use this to enrich a prompt before sending it to another agent (e.g. Superhuman Go Prompt Rewriter). Read-only. Session enrichment is opt-in: it is included only when the server has AGENTBRIDGE_MCP_URL configured, and degrades to memory-only (or an explicit offline note) otherwise.",
+  "One-shot memory context: hybrid-relevant CORTEX memories, active entities and stored constraints, trimmed to a token budget. Use this to enrich a prompt before sending it to another agent. Live session context belongs to a separate service and is not fetched by Cortex.",
   {
     query: z.string().describe("The prompt or topic to enrich"),
     agent_id: z
@@ -362,31 +352,20 @@ server.tool(
       .describe("Agent ID (default: arlo)"),
     token_budget: z
       .number()
+      .int()
+      .nonnegative()
       .default(1200)
       .describe("Max estimated tokens for the whole digest (default: 1200)"),
     limit: z
       .number()
       .default(8)
       .describe("Max memories to consider (default: 8)"),
-    include_session: z
-      .boolean()
-      .default(true)
-      .describe("Merge live AgentBridge session context when configured (default true; no-op when unconfigured)"),
-    session_target: z
-      .string()
-      .optional()
-      .describe("Specific AgentBridge session to inspect (title/PID/UUID). Omit to auto-pick the most recent active session."),
   },
   { readOnlyHint: true },
-  async ({ query, agent_id, token_budget, limit, include_session, session_target }) => {
-    const agentId = await resolveAgent(agent_id);
+  async ({ query, agent_id, token_budget, limit }) => {
+    const agentId = await resolveAgent(agent_id, !opts?.only);
     const rows = await runHybridSearch(query, agentId, limit);
-    // Opt-in + graceful: undefined when AgentBridge is unconfigured; an explicit offline
-    // note when configured but unreachable. Never throws into the digest.
-    const sessionMarkdown = include_session
-      ? await collectAgentBridgeSession({ target: session_target })
-      : undefined;
-    const text = buildPromptContextDigest(query, rows, agent_id, token_budget, sessionMarkdown);
+    const text = buildPromptContextDigest(query, rows, agent_id, token_budget);
     return { content: [{ type: "text" as const, text }] };
   }
 );
@@ -403,7 +382,7 @@ server.tool(
   },
   { readOnlyHint: true },
   async ({ agent_id }) => {
-    const agentId = await resolveAgent(agent_id);
+    const agentId = await resolveAgent(agent_id, !opts?.only);
 
     // Get system stats
     const memoryCountResult = await db.execute(sql`
@@ -712,7 +691,7 @@ server.tool(
       .default("arlo")
       .describe("Agent ID (default: arlo)"),
     cycle_type: z
-      .enum(["full", "resonance_only", "pruning_only", "consolidation_only"])
+      .enum(["full", "sws_only", "rem_only", "resonance_only", "pruning_only", "consolidation_only"])
       .default("full")
       .describe("Type of dream cycle to run"),
   },
@@ -1124,7 +1103,10 @@ server.tool(
     reason: z.string().default("belief_update").describe("Why the memory is being updated (e.g., correction, expansion, refinement, belief_update)"),
   },
   async ({ agent_id, memory_id, new_content, reason }) => {
-    const result = await reconsolidate(memory_id, new_content, reason);
+    // Scope the update to the caller's resolved agent namespace: a memory owned by
+    // another agent must report not_found, never mutate, even with a valid id.
+    const agentId = await resolveAgent(agent_id, !opts?.only);
+    const result = await reconsolidate(memory_id, new_content, reason, agentId);
 
     if (result.status === "not_found") {
       return { content: [{ type: "text" as const, text: `Memory #${memory_id} not found.` }] };
@@ -1292,7 +1274,9 @@ async function main() {
   process.stdin.on("error", () => shutdown("stdin error"));
 }
 
-main().catch((err) => {
-  console.error("[cortex-mcp] Fatal:", err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("[cortex-mcp] Fatal:", err);
+    process.exit(1);
+  });
+}

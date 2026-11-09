@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { db } from "../db/index.js";
 import { sql } from "drizzle-orm";
+import { PACKAGE_VERSION } from "../lib/version.js";
 
 const router = Router();
 
@@ -12,7 +13,7 @@ router.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     service: "cortex-v2",
-    version: "0.1.0",
+    version: PACKAGE_VERSION,
     timestamp: new Date().toISOString(),
   });
 });
@@ -73,7 +74,7 @@ router.get("/status", async (req: Request, res: Response) => {
     res.json({
       status: "ok",
       service: "cortex-v2",
-      version: "0.1.0",
+      version: PACKAGE_VERSION,
       stats: {
         agents: agentCount?.count ?? 0,
         totalMemories: memoryCount?.count ?? 0,

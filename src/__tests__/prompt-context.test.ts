@@ -1,4 +1,5 @@
 import { buildPromptContextDigest, PromptContextRow } from "../mcp/prompt-context";
+import { countTokens } from "../ingestion/chunker";
 
 function row(over: Partial<PromptContextRow>): PromptContextRow {
   return {
@@ -50,11 +51,10 @@ describe("buildPromptContextDigest", () => {
     expect(constraints).not.toContain("weak note");
   });
 
-  it("honors the token budget: a tiny budget yields no memory section", () => {
+  it.each([0, 4, 17, 1200])("bounds the whole digest to %i tokens including Unicode framing", budget => {
     const rows = [row({ content: "x".repeat(2000), priority: 1 })];
-    const out = buildPromptContextDigest("q", rows, "arlo", 4); // memoryBudget = floor(4*0.7)=2
-    expect(out).toContain("No relevant memories found.");
-    expect(out).not.toContain("## Relevant memories (scored)");
+    const out = buildPromptContextDigest("\u4e16\u754c".repeat(2000), rows, "arlo", budget);
+    expect(countTokens(out)).toBeLessThanOrEqual(budget);
   });
 
   it("empty rows produce a zero-node footer and no sections", () => {
@@ -64,39 +64,4 @@ describe("buildPromptContextDigest", () => {
     expect(out).not.toContain("## Active entities");
   });
 
-  describe("session section", () => {
-    const rows = [row({ content: "memory one", priority: 1, entities: ["e1"] })];
-
-    it("omits the session section when no session markdown is supplied (default path)", () => {
-      const out = buildPromptContextDigest("q", rows, "arlo", 1200);
-      expect(out).not.toContain("## Active session context (AgentBridge)");
-    });
-
-    it("renders live session context when provided", () => {
-      const out = buildPromptContextDigest(
-        "q",
-        rows,
-        "arlo",
-        2000,
-        "Active sessions: 2/2 — FC (claude), W2 (omo)\nFocus: FC (claude) — holds claim",
-      );
-      expect(out).toContain("## Active session context (AgentBridge)");
-      expect(out).toContain("FC (claude)");
-    });
-
-    it("always emits the session section even for the offline note on a tiny budget", () => {
-      const offline = "[AgentBridge: host offline; rewriting without live session context]";
-      const out = buildPromptContextDigest("q", rows, "arlo", 8, offline);
-      expect(out).toContain("## Active session context (AgentBridge)");
-      // Never a silent gap: the note (or a truncation of it) is present.
-      expect(out).toContain("AgentBridge");
-    });
-
-    it("truncates an over-budget session block instead of dropping it", () => {
-      const big = "word ".repeat(2000);
-      const out = buildPromptContextDigest("q", rows, "arlo", 300, big);
-      expect(out).toContain("…[truncated]");
-      expect(out.length).toBeLessThan(4000);
-    });
-  });
 });
