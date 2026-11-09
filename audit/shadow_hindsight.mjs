@@ -21,6 +21,7 @@
  *
  * Read-only: reads telemetry, OmO session logs and memory notes. Writes nothing (telemetry disabled).
  * Usage: node shadow_hindsight.mjs [--json] [--since 2026-10-31] [--draws 20] [--min-hits 3] [--details]
+ *        [--min-prompt N] [--floor X] [--index-weight W] [--margin M] [--session-dedup]   (replay refinements on logged decisions)
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -40,6 +41,24 @@ const SINCE_MS = Date.parse(argVal("--since", "1970-01-01"));
 const PLACEBO_DRAWS = Number(argVal("--draws", "20"));
 const MIN_HITS = Number(argVal("--min-hits", "3"));
 const MATCH_WINDOW_MS = 10 * 60 * 1000;
+
+// Replay flags: re-apply recall refinements to the already-logged decisions (defaults = no-op, output unchanged).
+const REPLAY = {
+  minPrompt: args.includes("--min-prompt") ? Number(argVal("--min-prompt", "0")) : null,
+  floor: args.includes("--floor") ? Number(argVal("--floor", "0")) : null,
+  indexWeight: args.includes("--index-weight") ? Number(argVal("--index-weight", "1")) : null,
+  margin: args.includes("--margin") ? Number(argVal("--margin", "0")) : null,
+  sessionDedup: args.includes("--session-dedup"),
+};
+const REPLAY_ON = Object.values(REPLAY).some((v) => v !== null && v !== false);
+const INDEX_SOURCE_RE = /(^|\/)index\.md(#|$)|#Files$/i;
+const replayStats = {
+  minPrompt: { decisions: 0, chunks: 0 },
+  floor: { decisions: 0, chunks: 0 },
+  indexWeight: { decisions: 0, chunks: 0 },
+  margin: { decisions: 0, chunks: 0, marginUnknown: 0 },
+  sessionDedup: { decisions: 0, chunks: 0 },
+};
 
 const HOME = os.homedir();
 const AGENTS_ROOT = path.join(HOME, ".omo", "memory", "agents");
@@ -122,6 +141,60 @@ for (const agent of fs.existsSync(AGENTS_ROOT) ? fs.readdirSync(AGENTS_ROOT) : [
       s.wouldInjectTokens += r.tokens || 0;
       decisions.push({ agent, ...r });
     }
+  }
+}
+
+// ── 1b. Hindsight replay of refinements on the logged would-inject decisions ──
+// Order mirrors the extension: min-prompt -> index weight -> floor -> session dedup -> margin.
+if (REPLAY_ON) {
+  const dropped = new Set();
+  const proposed = new Map(); // session -> Set(source)
+  const ordered = [...decisions].sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
+  for (const d of ordered) {
+    const orig = d.injected;
+    const stage = (name, next) => {
+      replayStats[name].chunks += d.injected.length - next.length;
+      if (d.injected.length && !next.length) replayStats[name].decisions++;
+      d.injected = next;
+    };
+    if (REPLAY.minPrompt !== null && d.promptChars < REPLAY.minPrompt) stage("minPrompt", []);
+    if (d.injected.length && REPLAY.indexWeight !== null) {
+      d.injected = d.injected.map((c) => (INDEX_SOURCE_RE.test(String(c.source)) ? { ...c, score: c.score * REPLAY.indexWeight } : c));
+    }
+    // The weight only changes scores; it is credited with the chunks the floor then removes because of it.
+    // Without --floor, a weight is still judged against the extension's own default floor (0.34).
+    const floor = REPLAY.floor ?? (REPLAY.indexWeight !== null ? 0.34 : null);
+    if (d.injected.length && floor !== null) {
+      const kept = d.injected.filter((c) => c.score >= floor);
+      const byWeight = REPLAY.indexWeight !== null ? d.injected.filter((c, i) => c.score < floor && orig[i].score >= floor).length : 0;
+      replayStats.floor.chunks += d.injected.length - kept.length - byWeight;
+      replayStats.indexWeight.chunks += byWeight;
+      if (!kept.length) replayStats[byWeight === d.injected.length ? "indexWeight" : "floor"].decisions++;
+      d.injected = kept;
+    }
+    if (d.injected.length && REPLAY.sessionDedup) {
+      const seen = proposed.get(d.session) || new Set();
+      stage("sessionDedup", d.injected.filter((c) => !seen.has(c.source)));
+    }
+    if (d.injected.length && REPLAY.margin !== null) {
+      if (d.injected.length >= 2) {
+        const sc = d.injected.map((c) => c.score).sort((a, b) => b - a);
+        if (sc[0] - sc[1] < REPLAY.margin) stage("margin", []);
+      } else replayStats.margin.marginUnknown++;
+    }
+    if (!d.injected.length) dropped.add(d);
+    else if (REPLAY.sessionDedup) {
+      const seen = proposed.get(d.session) || new Set();
+      for (const c of d.injected) seen.add(c.source);
+      proposed.set(d.session, seen);
+    }
+  }
+  for (let i = decisions.length - 1; i >= 0; i--) {
+    const d = decisions[i];
+    if (!dropped.has(d)) continue;
+    decisions.splice(i, 1);
+    perAgentAll[d.agent].wouldInject--;
+    perAgentAll[d.agent].wouldInjectTokens -= d.tokens || 0;
   }
 }
 
@@ -369,6 +442,7 @@ const overall = {
 const result = {
   generatedAt: new Date().toISOString(),
   rule: { minHits: MIN_HITS, placeboDraws: PLACEBO_DRAWS, matchWindowMs: MATCH_WINDOW_MS, since: argVal("--since", "all") },
+  ...(REPLAY_ON ? { replay: { flags: REPLAY, removed: replayStats } } : {}),
   overall,
   perAgent,
   ...(DETAILS ? { decisions: rows } : {}),
@@ -392,6 +466,12 @@ if (AS_JSON) {
   };
   for (const [a, s] of Object.entries(perAgent)) line(a, s);
   line("OVERALL", overall);
+  if (REPLAY_ON) {
+    const rs = replayStats;
+    console.log(
+      `REPLAY flags ${JSON.stringify(REPLAY)} | removed (decisions/chunks): minPrompt ${rs.minPrompt.decisions}/${rs.minPrompt.chunks}, indexWeight ${rs.indexWeight.decisions}/${rs.indexWeight.chunks}, floor ${rs.floor.decisions}/${rs.floor.chunks}, sessionDedup ${rs.sessionDedup.decisions}/${rs.sessionDedup.chunks}, margin ${rs.margin.decisions}/${rs.margin.chunks} (marginUnknown ${rs.margin.marginUnknown})`
+    );
+  }
   console.log(
     `p(turn >= observed | placebo) = ${overall.hindsight.pTurnVsPlacebo?.toExponential(2)}; p(session >= observed | placebo) = ${overall.hindsight.pSessionVsPlacebo?.toExponential(2)}`
   );
