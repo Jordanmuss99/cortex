@@ -12,6 +12,10 @@
  *   token-optimizer - duplicate folds and spills seen in tool results.
  *   project-guard   - blocked tool calls.
  *   omo built-ins   - kibitzer recalls, memory notices, reflection launches.
+ *   Recall telemetry - every ~/.omo/memory/agents/<agent>/runtime/cortex-telemetry.jsonl, with shadow-mode
+ *                     decisions (logged, never injected) reported separately from live injections. The session
+ *                     sections above only see live injections; in shadow mode use this section and
+ *                     shadow_hindsight.mjs.
  *
  * Usage:
  *   node usage_audit.mjs [--days 7] [--json] [--project lucid-salk]
@@ -306,8 +310,44 @@ for (const [p, b] of Object.entries(report)) {
   };
 }
 
+// Recall telemetry: decisions logged by cortex-memory.js, shadow (never injected) vs live (injected).
+// Rows written before shadow mode existed carry no `shadow` field; they were live.
+const AGENTS_ROOT = path.join(HOME, ".omo", "memory", "agents");
+const telemetry = {};
+for (const agent of fs.existsSync(AGENTS_ROOT) ? fs.readdirSync(AGENTS_ROOT) : []) {
+  const f = path.join(AGENTS_ROOT, agent, "runtime", "cortex-telemetry.jsonl");
+  if (!fs.existsSync(f)) continue;
+  const t = { decisions: 0, shadow: { decisions: 0, wouldInject: 0, chunks: 0, tokens: 0 }, live: { decisions: 0, injected: 0, chunks: 0, tokens: 0 }, redundantSkipped: 0, sources: {} };
+  for (const line of fs.readFileSync(f, "utf8").split("\n")) {
+    if (!line) continue;
+    let r;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if ((Date.parse(r.at) || 0) < sinceMs) continue;
+    t.decisions++;
+    t.redundantSkipped += r.redundantSkipped || 0;
+    const inj = Array.isArray(r.injected) ? r.injected : [];
+    const side = r.shadow === true ? t.shadow : t.live;
+    side.decisions++;
+    if (inj.length) {
+      if (r.shadow === true) side.wouldInject++;
+      else side.injected++;
+      side.chunks += inj.length;
+      side.tokens += r.tokens || 0;
+      for (const c of inj) {
+        const top = String(c.source || "").split("/")[0];
+        t.sources[top] = (t.sources[top] || 0) + 1;
+      }
+    }
+  }
+  if (t.decisions) telemetry[agent] = t;
+}
+
 if (AS_JSON) {
-  console.log(JSON.stringify(out, null, 2));
+  console.log(JSON.stringify({ ...out, _cortexTelemetry: telemetry }, null, 2));
 } else {
   for (const [p, r] of Object.entries(out)) {
     if (!r.realUserTurns && !r.promptCache.assistantMsgs) continue;
@@ -323,6 +363,12 @@ if (AS_JSON) {
     );
     console.log(
       `TokOpt: ${r.tokenOptimizer.duplicateFolds} dup folds, ${r.tokenOptimizer.spills} spills | Guard: ${r.projectGuard.blocks} blocks | omo: kibitzer ${r.omoBuiltins.kibitzerRecalls}, notices ${r.omoBuiltins.memoryNotices}, reflections ${r.omoBuiltins.reflectionLaunches}`
+    );
+  }
+  console.log(`\n== Cortex recall telemetry (cortex-telemetry.jsonl, last ${DAYS}d) ==`);
+  for (const [a, t] of Object.entries(telemetry)) {
+    console.log(
+      `${a}: ${t.decisions} decisions | shadow ${t.shadow.decisions} (would-inject ${t.shadow.wouldInject} ${pct(t.shadow.wouldInject, t.shadow.decisions)}, ${t.shadow.chunks} chunks, ${t.shadow.tokens} tok) | live ${t.live.decisions} (injected ${t.live.injected}, ${t.live.chunks} chunks, ${t.live.tokens} tok) | redundant-skipped ${t.redundantSkipped} | sources ${JSON.stringify(t.sources)}`
     );
   }
 }
