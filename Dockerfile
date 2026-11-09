@@ -11,6 +11,7 @@ COPY scripts/ ./scripts/
 
 RUN npx tsc --noEmit
 
-EXPOSE 3100
+# 4000, not 3100: the OmO 3D dashboard owns 3100 on the host by default
+EXPOSE 4000
 
 CMD ["npx", "tsx", "src/index.ts"]

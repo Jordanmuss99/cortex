@@ -19,7 +19,7 @@
  * If CORTEX_MCP_PUBLIC_URL or CORTEX_OAUTH_ISSUER is missing, OAuth validation is DISABLED and
  * only the static bearer path is active (fail-closed, exactly as before).
  */
-import type { Request } from "express";
+import type { NextFunction, Request, Response } from "express";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import { timingSafeEqual } from "node:crypto";
 
@@ -141,6 +141,20 @@ export function resourceMetadataUrl(req: Request): string {
 // The `WWW-Authenticate` value a client must see on 401 to bootstrap discovery.
 export function wwwAuthenticate(req: Request): string {
   return `Bearer resource_metadata="${resourceMetadataUrl(req)}"`;
+}
+
+/**
+ * Express middleware: the same authentication POST /mcp uses (OAuth JWT or static bearer,
+ * fail-closed), with the same 401 body shape and WWW-Authenticate header.
+ */
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const auth = await authenticate(req);
+  if (!auth.ok) {
+    res.setHeader("WWW-Authenticate", wwwAuthenticate(req));
+    res.status(401).json({ error: auth.error });
+    return;
+  }
+  next();
 }
 
 // RFC 9728 PRM body. Returns null when OAuth is not configured (caller serves 404).

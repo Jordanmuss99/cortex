@@ -173,8 +173,10 @@ Add to your agent's `.mcp.json`:
 
 ```bash
 npx tsx src/index.ts
-# Server starts on port 3100
+# Server starts on port 4000
 ```
+
+Every `/api/v1/*` route requires the same credentials as `POST /mcp`: an OAuth access token or the static `CORTEX_MCP_TOKEN`, sent as `Authorization: Bearer <token>`. With neither configured, the API answers 401 (fail closed).
 
 ---
 

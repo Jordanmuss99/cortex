@@ -20,8 +20,18 @@ services:
       DATABASE_URL: "postgresql://cortex:cortex@db:5432/cortex"
       VOYAGE_API_KEY: "${VOYAGE_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      # MCP auth passthrough: unset means /mcp fails closed (401), which is the
+      # intended safe default; set these in the host shell/env file to enable the
+      # remote read-only surface on this topology.
+      CORTEX_MCP_TOKEN: "${CORTEX_MCP_TOKEN:-}"
+      CORTEX_MCP_PUBLIC_URL: "${CORTEX_MCP_PUBLIC_URL:-}"
+      CORTEX_OAUTH_ISSUER: "${CORTEX_OAUTH_ISSUER:-}"
+      CORTEX_OAUTH_JWKS_URI: "${CORTEX_OAUTH_JWKS_URI:-}"
+      # Kept explicit so the host mapping below and the container agree. The API uses 4000
+      # because the OmO 3D dashboard owns 3100 by default (see README "Ports").
+      CORTEX_API_PORT: "4000"
     ports:
-      - "3100:3100"
+      - "4000:4000"
 
 volumes:
   cortex_data:
