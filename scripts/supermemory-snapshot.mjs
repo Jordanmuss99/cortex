@@ -101,6 +101,13 @@ const isNetworkFailure = (err) =>
   );
 
 async function main() {
+  // Section-7 Q7 knob: the OmO Supermemory config can switch this snapshot off without unregistering the
+  // scheduled task. Absent or unreadable config keeps today's behavior (snapshot runs).
+  const omoCfg = readJson(process.env.OMO_SUPERMEMORY_CONFIG || path.join(HOME, ".omo", "supermemory.json"));
+  if (omoCfg?.snapshot?.enabled === false) {
+    console.log(JSON.stringify({ at: new Date().toISOString(), skipped: "snapshot.enabled=false in OmO supermemory config" }));
+    return;
+  }
   const plugin = newestPluginLib();
   if (!plugin) {
     console.error("supermemory plugin library not found under", PLUGIN_ROOT);

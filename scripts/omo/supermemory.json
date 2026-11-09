@@ -1,0 +1,62 @@
+{
+  "$schemaVersion": 1,
+  "_section7": {
+    "Q1_capture_and_recall": "capture.mode = live | dry-run | off ; recall.mode = shadow | live | off",
+    "Q2_non_git_cwd": "nonGitPolicy = skip | scratch | path",
+    "Q3_spawnedBy_children": "includeWorkerChildren = false (skip) | true",
+    "Q4_timeout_and_breaker": "recall.timeoutMs, recall.circuitBreakerFailures, recall.circuitBreakerCooldownMs",
+    "Q5_session_profile": "recall.injectProfile = false | true ; recall.maxProfileItems",
+    "Q6_simsonline_coexistence": "repos.repo_simsonline__5ba2ba9e54cb8bd7.recall.mode ; coexistence.singleInjector",
+    "Q7_snapshot_task": "snapshot.enabled = true (6-hourly task runs) | false (task stays registered, no-op)"
+  },
+  "_comment": "INSTALLED 2026-11-10 with the user's section-7 rulings (relayed by lucid-salk-77): Q1 live capture + shadow recall, Q2 nonGitPolicy path, Q3 skip children, Q4 5 s + 60 s breaker after 2 timeouts, Q5 no profile injection, Q6 SimsOnline recall shadow + singleInjector with live capture, Q7 snapshot task kept. Design: cortex/.omo/evidence/cortex-audit-20261110/omo-supermemory-design.md. No secrets in this file.",
+  "enabled": true,
+  "nonGitPolicy": "path",
+  "includeWorkerChildren": false,
+  "mcp": {
+    "enabled": true
+  },
+  "capture": {
+    "timeoutMs": 30000,
+    "maxBatchChars": 16000,
+    "minTurnChars": 100,
+    "maxOutboxAttempts": 10,
+    "mode": "live"
+  },
+  "recall": {
+    "mode": "shadow",
+    "injectProfile": false,
+    "minPromptChars": 40,
+    "topFloor": 0.68,
+    "minSpread": 0.03,
+    "relWindow": 0.1,
+    "absFloor": 0.62,
+    "maxResults": 6,
+    "maxResultChars": 300,
+    "maxPromptTokens": 450,
+    "timeoutMs": 5000,
+    "circuitBreakerFailures": 2,
+    "circuitBreakerCooldownMs": 60000,
+    "maxSeenHashes": 500,
+    "maxProfileItems": 5
+  },
+  "coexistence": {
+    "singleInjector": true,
+    "primaryInjector": "supermemory"
+  },
+  "containerOverrides": {
+    "E:/deadlock_data": {
+      "namespace": "repo_deadlock_ai__4c57561d5055354f"
+    }
+  },
+  "repos": {
+    "repo_simsonline__5ba2ba9e54cb8bd7": {
+      "recall": {
+        "mode": "shadow"
+      }
+    }
+  },
+  "snapshot": {
+    "enabled": true
+  }
+}
